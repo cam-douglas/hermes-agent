@@ -277,9 +277,15 @@ def _resolve_named_custom_runtime(
     api_key_candidates = [
         (explicit_api_key or "").strip(),
         str(custom_provider.get("api_key", "") or "").strip(),
-        os.getenv("OPENAI_API_KEY", "").strip(),
-        os.getenv("OPENROUTER_API_KEY", "").strip(),
     ]
+    if "x.ai" in base_url.lower():
+        api_key_candidates.append(os.getenv("XAI_API_KEY", "").strip())
+    api_key_candidates.extend(
+        [
+            os.getenv("OPENAI_API_KEY", "").strip(),
+            os.getenv("OPENROUTER_API_KEY", "").strip(),
+        ]
+    )
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
     return {
@@ -345,12 +351,20 @@ def _resolve_openrouter_runtime(
         ]
     else:
         # Custom endpoint: use api_key from config when using config base_url (#1760).
+        # xAI Grok users often set XAI_API_KEY only; prefer it when base_url targets x.ai
+        # so we do not silently use a different OPENAI_API_KEY (wrong quota / 429).
         api_key_candidates = [
             explicit_api_key,
             (cfg_api_key if use_config_base_url else ""),
-            os.getenv("OPENAI_API_KEY"),
-            os.getenv("OPENROUTER_API_KEY"),
         ]
+        if "x.ai" in base_url.lower():
+            api_key_candidates.append(os.getenv("XAI_API_KEY"))
+        api_key_candidates.extend(
+            [
+                os.getenv("OPENAI_API_KEY"),
+                os.getenv("OPENROUTER_API_KEY"),
+            ]
+        )
     api_key = next(
         (str(candidate or "").strip() for candidate in api_key_candidates if has_usable_secret(candidate)),
         "",

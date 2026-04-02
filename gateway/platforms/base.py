@@ -1165,7 +1165,21 @@ class BasePlatformAdapter(ABC):
 
                 # Send the text portion
                 if text_content:
-                    logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
+                    if _thread_metadata and _thread_metadata.get("thread_id"):
+                        logger.info(
+                            "[%s] Sending response (%d chars) to %s (thread_id=%s)",
+                            self.name,
+                            len(text_content),
+                            event.source.chat_id,
+                            _thread_metadata.get("thread_id"),
+                        )
+                    else:
+                        logger.info(
+                            "[%s] Sending response (%d chars) to %s",
+                            self.name,
+                            len(text_content),
+                            event.source.chat_id,
+                        )
                     result = await self._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,

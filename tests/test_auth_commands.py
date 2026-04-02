@@ -389,3 +389,12 @@ def test_auth_list_shows_exhausted_cooldown(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "exhausted (429)" in out
     assert "59m 30s left" in out
+
+
+def test_has_usable_secret_rejects_unexpanded_env_placeholder():
+    """Config ${VAR} must not win over real env when VAR was missing at YAML expand."""
+    from hermes_cli.auth import has_usable_secret
+
+    assert not has_usable_secret("${XAI_API_KEY}")
+    assert not has_usable_secret("prefix-${OPENAI_API_KEY}-suffix")
+    assert has_usable_secret("sk-real-key-at-least-four-chars")

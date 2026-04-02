@@ -1596,6 +1596,12 @@ class GatewayRunner:
 
         user_id = source.user_id
         if not user_id:
+            logger.warning(
+                "Rejecting message: missing user_id on %s (chat_id=%s chat_type=%s)",
+                source.platform.value if source.platform else "unknown",
+                getattr(source, "chat_id", None),
+                getattr(source, "chat_type", None),
+            )
             return False
 
         platform_env_map = {
@@ -5618,12 +5624,13 @@ class GatewayRunner:
             if self._ephemeral_system_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + self._ephemeral_system_prompt).strip()
 
-            # Re-read .env and config for fresh credentials (gateway is long-lived,
-            # keys may change without restart).
+            # Re-read ~/.hermes/.env + project .env (same order as process startup) so
+            # worker threads resolve the same credentials as the main process.
             try:
-                load_dotenv(_env_path, override=True, encoding="utf-8")
-            except UnicodeDecodeError:
-                load_dotenv(_env_path, override=True, encoding="latin-1")
+                load_hermes_dotenv(
+                    hermes_home=_hermes_home,
+                    project_env=Path(__file__).resolve().parents[1] / ".env",
+                )
             except Exception:
                 pass
 

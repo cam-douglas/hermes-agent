@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import shlex
 import stat
@@ -300,6 +301,9 @@ _PLACEHOLDER_SECRET_VALUES = {
     "none",
 }
 
+# Unexpanded ${VAR} from config when the variable was missing at load_config() time.
+_UNEXPANDED_ENV_REF = re.compile(r"\$\{[^}]+\}")
+
 
 def has_usable_secret(value: Any, *, min_length: int = 4) -> bool:
     """Return True when a configured secret looks usable, not empty/placeholder."""
@@ -309,6 +313,8 @@ def has_usable_secret(value: Any, *, min_length: int = 4) -> bool:
     if len(cleaned) < min_length:
         return False
     if cleaned.lower() in _PLACEHOLDER_SECRET_VALUES:
+        return False
+    if _UNEXPANDED_ENV_REF.search(cleaned):
         return False
     return True
 

@@ -1535,7 +1535,30 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         if not update.message or not update.message.text:
             return
+        if self._is_group_chat(update.message):
+            _cid = str(getattr(getattr(update.message, "chat", None), "id", "") or "")
+            _uid = getattr(update.message.from_user, "id", None) if update.message.from_user else None
+            _mtid = getattr(update.message, "message_thread_id", None)
+            _is_topic = getattr(update.message, "is_topic_message", None)
+            logger.info(
+                "[%s] Inbound group text: chat_id=%s from_user_id=%s thread_id=%s is_topic=%s require_mention=%s free_response_chats=%s",
+                self.name,
+                _cid,
+                _uid,
+                _mtid,
+                _is_topic,
+                self._telegram_require_mention(),
+                sorted(self._telegram_free_response_chats()),
+            )
         if not self._should_process_message(update.message):
+            if self._is_group_chat(update.message):
+                _cid = str(getattr(getattr(update.message, "chat", None), "id", "") or "")
+                logger.info(
+                    "[%s] Dropped group text (trigger rules). chat_id=%s in_free_response_chats=%s",
+                    self.name,
+                    _cid,
+                    _cid in self._telegram_free_response_chats(),
+                )
             return
 
         event = self._build_message_event(update.message, MessageType.TEXT)
@@ -1638,10 +1661,17 @@ class TelegramAdapter(BasePlatformAdapter):
             event = self._pending_text_batches.pop(key, None)
             if not event:
                 return
-            logger.info(
-                "[Telegram] Flushing text batch %s (%d chars)",
-                key, len(event.text or ""),
-            )
+            _tid = getattr(getattr(event, "source", None), "thread_id", None)
+            if _tid:
+                logger.info(
+                    "[Telegram] Flushing text batch %s (%d chars, thread_id=%s)",
+                    key, len(event.text or ""), _tid,
+                )
+            else:
+                logger.info(
+                    "[Telegram] Flushing text batch %s (%d chars)",
+                    key, len(event.text or ""),
+                )
             await self.handle_message(event)
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:
