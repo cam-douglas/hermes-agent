@@ -14,6 +14,8 @@ import json
 import logging
 import os
 import re
+import ssl
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Any, Tuple, List
@@ -263,6 +265,36 @@ def _resolve_slack_proxy_url() -> Optional[str]:
         return None
 
     return proxy_url
+
+
+def _slack_ssl_context_for_aiohttp() -> Optional[ssl.SSLContext]:
+    """Build an SSL context aiohttp can use to verify api.slack.com.
+
+    The python.org macOS installer often ships without a complete system CA
+    bundle, which breaks TLS to Slack. When ``certifi`` is present (pulled in
+    by core deps such as httpx), use its CA file on ``darwin``, or whenever
+    ``HERMES_SLACK_SSL_CERTIFI`` is ``1``/``true``. Set
+    ``HERMES_SLACK_SSL_CERTIFI=0`` to keep the OpenSSL default store (needed
+    for some enterprise custom roots).
+    """
+    flag = os.environ.get("HERMES_SLACK_SSL_CERTIFI", "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return None
+    use_certifi = flag in ("1", "true", "yes", "on") or (
+        not flag and sys.platform == "darwin"
+    )
+    if not use_certifi:
+        return None
+    try:
+        import certifi
+    except ImportError:
+        logger.debug("[Slack] certifi not installed; using default SSL context")
+        return None
+    try:
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception as e:
+        logger.warning("[Slack] Could not build certifi-backed SSL context: %s", e)
+        return None
 
 
 class SlackAdapter(BasePlatformAdapter):
@@ -545,13 +577,22 @@ class SlackAdapter(BasePlatformAdapter):
 
             # First token is the primary — used for AsyncApp / Socket Mode
             primary_token = bot_tokens[0]
-            self._app = AsyncApp(token=primary_token)
-            _apply_slack_proxy(self._app.client, proxy_url)
+            ssl_ctx = _slack_ssl_context_for_aiohttp()
+
+            def _make_web_client(token: str) -> Any:
+                kw: dict[str, Any] = {"token": token}
+                if ssl_ctx is not None:
+                    kw["ssl"] = ssl_ctx
+                c = AsyncWebClient(**kw)
+                _apply_slack_proxy(c, proxy_url)
+                return c
+
+            primary_client = _make_web_client(primary_token)
+            self._app = AsyncApp(client=primary_client)
 
             # Register each bot token and map team_id → client
-            for token in bot_tokens:
-                client = AsyncWebClient(token=token)
-                _apply_slack_proxy(client, proxy_url)
+            for i, token in enumerate(bot_tokens):
+                client = primary_client if i == 0 else _make_web_client(token)
                 auth_response = await client.auth_test()
                 team_id = auth_response.get("team_id", "")
                 bot_user_id = auth_response.get("user_id", "")

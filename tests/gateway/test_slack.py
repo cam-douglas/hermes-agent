@@ -332,7 +332,7 @@ class TestSlackProxyBehavior:
         created_clients = []
 
         class FakeWebClient:
-            def __init__(self, token):
+            def __init__(self, token, **kwargs):
                 self.token = token
                 self.proxy = "constructor-default"
                 suffix = token.split("-")[-1]
@@ -345,9 +345,13 @@ class TestSlackProxyBehavior:
                 created_clients.append(self)
 
         class FakeApp:
-            def __init__(self, token):
-                self.token = token
-                self.client = FakeWebClient(token)
+            def __init__(self, token=None, client=None):
+                if client is not None:
+                    self.token = getattr(client, "token", token)
+                    self.client = client
+                else:
+                    self.token = token
+                    self.client = FakeWebClient(token)
                 self.registered_events = []
                 self.registered_commands = []
                 self.registered_actions = []
@@ -415,7 +419,7 @@ class TestSlackProxyBehavior:
         created_clients = []
 
         class FakeWebClient:
-            def __init__(self, token):
+            def __init__(self, token, **kwargs):
                 self.token = token
                 self.proxy = "constructor-default"
                 suffix = token.split("-")[-1]
@@ -428,9 +432,13 @@ class TestSlackProxyBehavior:
                 created_clients.append(self)
 
         class FakeApp:
-            def __init__(self, token):
-                self.token = token
-                self.client = FakeWebClient(token)
+            def __init__(self, token=None, client=None):
+                if client is not None:
+                    self.token = getattr(client, "token", token)
+                    self.client = client
+                else:
+                    self.token = token
+                    self.client = FakeWebClient(token)
                 self.registered_events = []
                 self.registered_commands = []
                 self.registered_actions = []
