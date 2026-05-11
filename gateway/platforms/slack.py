@@ -267,6 +267,30 @@ def _resolve_slack_proxy_url() -> Optional[str]:
     return proxy_url
 
 
+def slack_slash_command_pattern() -> re.Pattern[str]:
+    """Return the Bolt matcher for all Hermes Slack slash commands.
+
+    Covers each name from :func:`slack_native_slashes` as ``/name`` and legacy
+    ``/hermes-name``, plus a ``/hermes-<segment>`` catch-all (Slack's 32-char
+    limit) so commands that exist only in the Slack app manifest — e.g.
+    dropped by the 50-command manifest cap or added in the UI — still match.
+    Otherwise Bolt never runs ``ack`` and Slack reports the app did not
+    respond.
+    """
+    from hermes_cli.commands import slack_native_slashes
+
+    _slash_names = [name for name, _d, _h in slack_native_slashes()]
+    if not _slash_names:
+        return re.compile(r"^/hermes$")
+    _parts: list[str] = []
+    for n in _slash_names:
+        _parts.append(re.escape(n))
+        if n != "hermes":
+            _parts.append(re.escape(f"hermes-{n}"))
+    _parts.append(r"hermes-[a-z0-9_-]{1,32}")
+    return re.compile(r"^/(?:" + "|".join(_parts) + r")$")
+
+
 def _slack_ssl_context_for_aiohttp() -> Optional[ssl.SSLContext]:
     """Build an SSL context aiohttp can use to verify api.slack.com.
 
@@ -663,19 +687,7 @@ class SlackAdapter(BasePlatformAdapter):
             # routes the command event through the socket regardless of the
             # manifest's request URL, but it will not deliver an event for
             # a slash command the manifest doesn't declare.
-            from hermes_cli.commands import slack_native_slashes
-            import re as _re
-
-            _slash_names = [name for name, _d, _h in slack_native_slashes()]
-            if _slash_names:
-                _parts: list[str] = []
-                for n in _slash_names:
-                    _parts.append(_re.escape(n))
-                    if n != "hermes":
-                        _parts.append(_re.escape(f"hermes-{n}"))
-                _slash_pattern = _re.compile(r"^/(?:" + "|".join(_parts) + r")$")
-            else:  # pragma: no cover - registry always non-empty
-                _slash_pattern = _re.compile(r"^/hermes$")
+            _slash_pattern = slack_slash_command_pattern()
 
             @self._app.command(_slash_pattern)
             async def handle_hermes_command(ack, command):

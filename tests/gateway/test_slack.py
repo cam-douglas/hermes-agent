@@ -136,6 +136,20 @@ class TestSlashCommandSessionIsolation:
 # TestAppMentionHandler
 # ---------------------------------------------------------------------------
 
+class TestSlackSlashPattern:
+    def test_slack_slash_command_pattern_matches_native_and_legacy(self):
+        pat = _slack_mod.slack_slash_command_pattern()
+        assert pat.search("/hermes")
+        assert pat.search("/help")
+        assert pat.search("/hermes-help")
+        assert pat.search("/hermes-yolo")
+
+    def test_slack_slash_command_pattern_catches_manifest_only_hermes_prefix(self):
+        """If a /hermes-* exists in Slack but was dropped from slack_native_slashes."""
+        pat = _slack_mod.slack_slash_command_pattern()
+        assert pat.search("/hermes-thisisonlyonslackappconfigpage")
+
+
 class TestAppMentionHandler:
     """Verify that the app_mention event handler is registered."""
 
