@@ -205,6 +205,26 @@ class TestAppMentionHandler:
             assert slash_matcher.match(expected), (
                 f"Slack slash regex does not match {expected}"
             )
+        assert slash_matcher.match("/hermes-help"), (
+            "legacy /hermes-* manifest form must match"
+        )
+
+
+class TestLegacyHermesPrefixedSlackSlashes:
+    @pytest.mark.asyncio
+    async def test_hermes_help_prefix_routes_to_help(self, adapter):
+        command = {
+            "command": "/hermes-help",
+            "text": "",
+            "user_id": "U123",
+            "channel_id": "C123",
+            "team_id": "T123",
+            "response_url": "https://hooks.slack.com/commands/T/1/x",
+        }
+        await adapter._handle_slash_command(command)
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "/help"
 
 
 class TestSlackConnectCleanup:

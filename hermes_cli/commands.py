@@ -1010,19 +1010,31 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     return entries
 
 
-def slack_app_manifest(request_url: str = "https://hermes-agent.local/slack/commands") -> dict[str, Any]:
+def slack_app_manifest(
+    request_url: str | None = None,
+) -> dict[str, Any]:
     """Generate a Slack app manifest with all gateway commands as slashes.
 
     ``request_url`` is required by Slack's manifest schema for every slash
     command, but in Socket Mode (which we use) Slack ignores it and routes
-    the command event through the WebSocket. A placeholder URL is fine.
+    the command event through the WebSocket. Use a stable public HTTPS URL so
+    Slack's validators are satisfied when saving the manifest.
 
-    The returned dict is the ``features.slash_commands`` portion only —
+    Override with env ``HERMES_SLACK_MANIFEST_SLASH_URL`` (or pass *request_url*).
+
+    The returned dict is the ``features.slash_commands`` portion only;
     callers compose it into a full manifest (or merge into an existing
     one). Keeping it narrow avoids coupling us to the rest of the manifest
     schema (display_information, oauth_config, settings, etc.) which users
     set up once in the Slack UI and rarely change.
     """
+
+    if request_url is None:
+        request_url = (
+            os.environ.get("HERMES_SLACK_MANIFEST_SLASH_URL", "").strip()
+            or "https://example.com/"
+        )
+
     slashes = []
     for name, desc, usage in slack_native_slashes():
         entry = {

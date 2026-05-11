@@ -627,9 +627,12 @@ class SlackAdapter(BasePlatformAdapter):
 
             _slash_names = [name for name, _d, _h in slack_native_slashes()]
             if _slash_names:
-                _slash_pattern = _re.compile(
-                    r"^/(?:" + "|".join(_re.escape(n) for n in _slash_names) + r")$"
-                )
+                _parts: list[str] = []
+                for n in _slash_names:
+                    _parts.append(_re.escape(n))
+                    if n != "hermes":
+                        _parts.append(_re.escape(f"hermes-{n}"))
+                _slash_pattern = _re.compile(r"^/(?:" + "|".join(_parts) + r")$")
             else:  # pragma: no cover - registry always non-empty
                 _slash_pattern = _re.compile(r"^/hermes$")
 
@@ -2718,9 +2721,13 @@ class SlackAdapter(BasePlatformAdapter):
             else:
                 text = "/help"
         else:
-            # Native slash — /<slash_name> [args].  Route directly through the
-            # gateway command dispatcher by prepending the slash.
-            text = f"/{slash_name} {text}".strip()
+            # Native slash — /<name> [args].  Older Hermes Slack manifests
+            # registered every command as /hermes-<name>; normalize so the
+            # gateway dispatcher always sees /name [...] like Discord/Telegram.
+            routed = slash_name
+            if routed.startswith("hermes-") and len(routed) > len("hermes-"):
+                routed = routed[len("hermes-") :]
+            text = f"/{routed} {text}".strip()
 
         # Slack slash commands can originate from DMs or shared channels.
         # Preserve DM semantics only for DM channel IDs; shared channels must
