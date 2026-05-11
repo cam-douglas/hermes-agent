@@ -81,6 +81,36 @@ You can also set `providers.<id>.stale_timeout_seconds` for the non-streaming st
 
 Leaving these unset keeps the legacy defaults (`HERMES_API_TIMEOUT=1800`s, `HERMES_API_CALL_STALE_TIMEOUT=300`s, native Anthropic 900s). Not currently wired for AWS Bedrock (both `bedrock_converse` and AnthropicBedrock SDK paths use boto3 with its own timeout configuration). See the commented example in [`cli-config.yaml.example`](https://github.com/NousResearch/hermes-agent/blob/main/cli-config.yaml.example).
 
+## Handover v4 Runtime Controls
+
+`hermes config migrate` writes the handover v4 blocks with every new runtime feature disabled. This lets operators deploy the code, restart the gateway, and then enable one capability at a time.
+
+```yaml
+hermes_features:
+  handover_schema: 4
+
+adaptive_routing:
+  enabled: false
+  provider: openrouter
+  baseline_model: openai/gpt-5.4-mini
+  router_model: openai/gpt-5.5
+  consultant_models_allowlist: []
+
+emergency_fallback:
+  enabled: false
+
+spend_governance:
+  enabled: false
+
+profile_routing:
+  enabled: false
+
+org_escalation:
+  enabled: false
+```
+
+When enabled, adaptive routing uses OpenRouter only, emits JSON-only `routing` status events, and falls back to the baseline model if the router is unavailable or returns invalid output. Spend governance stores estimates under `HERMES_HOME/state/spend.sqlite3` unless `spend_governance.persist_path` is set. Temporary profile workflows can mark a profile with `hermes profile create <name> --ephemeral --ttl-hours 12`.
+
 ## Terminal Backend Configuration
 
 Hermes supports seven terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox (direct or via the Nous-managed gateway), a Daytona workspace, a Vercel Sandbox, or a Singularity/Apptainer container.

@@ -8313,6 +8313,8 @@ def cmd_profile(args):
         clone_all = getattr(args, "clone_all", False)
         no_alias = getattr(args, "no_alias", False)
         no_skills = getattr(args, "no_skills", False)
+        ephemeral = getattr(args, "ephemeral", False)
+        ttl_hours = getattr(args, "ttl_hours", None)
 
         try:
             clone_from = getattr(args, "clone_from", None)
@@ -8324,8 +8326,13 @@ def cmd_profile(args):
                 clone_config=clone,
                 no_alias=no_alias,
                 no_skills=no_skills,
+                ephemeral=ephemeral,
+                ttl_hours=ttl_hours,
             )
             print(f"\nProfile '{name}' created at {profile_dir}")
+            if ephemeral:
+                suffix = f" (ttl: {ttl_hours}h)" if ttl_hours else ""
+                print(f"Marked as ephemeral{suffix}.")
 
             if clone or clone_all:
                 source_label = (
@@ -11084,6 +11091,17 @@ Examples:
         "--no-skills",
         action="store_true",
         help="Create an empty profile with no bundled skills (opts out of `hermes update` skill sync)",
+    )
+    profile_create.add_argument(
+        "--ephemeral",
+        action="store_true",
+        help="Mark the profile as temporary for profile routing",
+    )
+    profile_create.add_argument(
+        "--ttl-hours",
+        type=float,
+        default=None,
+        help="Optional TTL hint for an ephemeral profile",
     )
 
     profile_delete = profile_subparsers.add_parser("delete", help="Delete a profile")

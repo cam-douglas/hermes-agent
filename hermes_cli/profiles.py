@@ -493,6 +493,8 @@ def create_profile(
     clone_config: bool = False,
     no_alias: bool = False,
     no_skills: bool = False,
+    ephemeral: bool = False,
+    ttl_hours: Optional[float] = None,
 ) -> Path:
     """Create a new profile directory.
 
@@ -515,6 +517,10 @@ def create_profile(
         a marker file so ``hermes update`` skips re-seeding this profile's
         skills. Mutually exclusive with ``clone_config``/``clone_all`` (those
         explicitly copy skills from the source).
+    ephemeral:
+        Mark the profile as temporary for handover v4 profile routing.
+    ttl_hours:
+        Optional TTL hint written to the ephemeral marker.
 
     Returns
     -------
@@ -615,6 +621,21 @@ def create_profile(
             )
         except OSError:
             pass  # best-effort — the feature still works via the empty skills/ dir
+
+    if ephemeral:
+        try:
+            import time as _time
+
+            marker = {
+                "created_at": _time.time(),
+                "ttl_hours": ttl_hours,
+            }
+            (profile_dir / ".ephemeral_profile").write_text(
+                json.dumps(marker, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     return profile_dir
 

@@ -162,6 +162,12 @@ from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
+from agent.adaptive_routing import (
+    resolve_route as resolve_adaptive_route,
+    status_payload as routing_status_payload,
+)
+from agent.spend_governance import record_spend, snapshots_to_payloads
+from agent.fallback_triggers import is_enabled_trigger, trigger_for_error
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
     _deterministic_call_id as _codex_deterministic_call_id,
@@ -1310,6 +1316,21 @@ class AIAgent:
         self.status_callback = status_callback
         self.tool_gen_callback = tool_gen_callback
 
+        try:
+            from hermes_cli.config import load_config as _load_handover_cfg
+            _runtime_cfg = _load_handover_cfg()
+        except Exception:
+            _runtime_cfg = {}
+        self._adaptive_routing_cfg = dict(_runtime_cfg.get("adaptive_routing") or {})
+        self._emergency_fallback_cfg = dict(_runtime_cfg.get("emergency_fallback") or {})
+        self._spend_governance_cfg = dict(_runtime_cfg.get("spend_governance") or {})
+        self._profile_routing_cfg = dict(_runtime_cfg.get("profile_routing") or {})
+        self._org_escalation_cfg = dict(_runtime_cfg.get("org_escalation") or {})
+        self._kanban_cfg = dict(_runtime_cfg.get("kanban") or {})
+        self._consultant_approval: Optional[Dict[str, Any]] = None
+        self._emergency_fallback_uses = 0
+        self._last_routing_decision = None
+
         
         # Tool execution state — allows _vprint during tool execution
         # even when stream consumers are registered (no tokens streaming then)
@@ -1743,6 +1764,14 @@ class AIAgent:
             self._fallback_chain = [fallback_model]
         else:
             self._fallback_chain = []
+        if self._emergency_fallback_cfg.get("enabled"):
+            emergency_fb = {
+                "provider": self._emergency_fallback_cfg.get("provider") or "openrouter",
+                "model": self._emergency_fallback_cfg.get("model") or "",
+                "_emergency": True,
+            }
+            if emergency_fb["model"] and emergency_fb not in self._fallback_chain:
+                self._fallback_chain.append(emergency_fb)
         self._fallback_index = 0
         self._fallback_activated = getattr(self, "_fallback_activated", False)
         # Legacy attribute kept for backward compat (tests, external callers)
@@ -2794,6 +2823,15 @@ class AIAgent:
             except Exception:
                 logger.debug("status_callback error in _emit_warning", exc_info=True)
 
+    def _emit_structured_status(self, kind: str, payload: Dict[str, Any]) -> None:
+        """Emit a handover v4 structured status payload as JSON."""
+        if not self.status_callback:
+            return
+        try:
+            self.status_callback(kind, json.dumps(payload, sort_keys=True))
+        except Exception:
+            logger.debug("status_callback error for %s", kind, exc_info=True)
+
     def _emit_auxiliary_failure(self, task: str, exc: BaseException) -> None:
         """Surface a compact warning for failed auxiliary work."""
         try:
@@ -2804,6 +2842,72 @@ class AIAgent:
         if len(detail) > 220:
             detail = detail[:217].rstrip() + "..."
         self._emit_warning(f"⚠ Auxiliary {task} failed: {detail}")
+
+    def _call_adaptive_router(self, messages: List[Dict[str, str]], model: str, timeout: float) -> str:
+        """Call the OpenRouter router model and return raw text."""
+        from agent.auxiliary_client import resolve_provider_client
+
+        client, resolved_model = resolve_provider_client(
+            "openrouter",
+            model=model,
+            raw_codex=False,
+        )
+        if client is None:
+            raise RuntimeError("openrouter_router_client_unavailable")
+        response = client.chat.completions.create(
+            model=resolved_model or model,
+            messages=messages,
+            temperature=0,
+            timeout=timeout,
+        )
+        return response.choices[0].message.content or ""
+
+    def _maybe_apply_adaptive_routing(self, user_message: str) -> None:
+        """Resolve and apply a per-turn model route when enabled."""
+        cfg = self._adaptive_routing_cfg
+        if not cfg.get("enabled"):
+            return
+        decision = resolve_adaptive_route(
+            cfg,
+            current_model=self.model,
+            user_message=user_message,
+            call_router=self._call_adaptive_router,
+        )
+        self._last_routing_decision = decision
+        if cfg.get("observability_channel", "footer") != "none":
+            self._emit_structured_status("routing", routing_status_payload(decision))
+
+        if decision.tier == "consultant":
+            self._emit_structured_status("escalation", {
+                "phase": "approved" if decision.approval else "denied",
+                "target_model": decision.target_model,
+                "approved": bool(decision.approval),
+                "reason_code": decision.reason_code,
+                "trace_id": self.session_id,
+            })
+        if decision.target_model and decision.target_model != self.model:
+            self.model = decision.target_model
+
+    def _emit_profile_state(self) -> None:
+        cfg = self._profile_routing_cfg
+        if not cfg.get("enabled"):
+            return
+        marker_name = str(cfg.get("ephemeral_mark_file") or ".ephemeral_profile")
+        marker = get_hermes_home() / marker_name
+        ttl = cfg.get("ephemeral_ttl_hours")
+        payload: Dict[str, Any] = {
+            "scope": "profile",
+            "name": get_hermes_home().name,
+            "ephemeral": marker.exists(),
+            "ttl_hours_remaining": None,
+        }
+        try:
+            if marker.exists() and ttl is not None:
+                age_h = (time.time() - marker.stat().st_mtime) / 3600
+                payload["ttl_hours_remaining"] = max(0, float(ttl) - age_h)
+        except Exception:
+            pass
+        self._emit_structured_status("profile", payload)
 
     def _current_main_runtime(self) -> Dict[str, str]:
         """Return the live main runtime for session-scoped auxiliary routing."""
@@ -5318,7 +5422,7 @@ class AIAgent:
         # dispatcher spawned this process (kanban_show check_fn gates on
         # HERMES_KANBAN_TASK env var). Normal chat sessions never see
         # this block.
-        if "kanban_show" in self.valid_tool_names:
+        if "kanban_show" in self.valid_tool_names or self._kanban_cfg.get("orchestrator_mode"):
             tool_guidance.append(KANBAN_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
@@ -8024,6 +8128,22 @@ class AIAgent:
 
         fb = self._fallback_chain[self._fallback_index]
         self._fallback_index += 1
+        if fb.get("_emergency"):
+            trigger = trigger_for_error(Exception(str(reason or "")), reason=reason)
+            configured = self._emergency_fallback_cfg.get("trigger_on") or []
+            max_uses = int(self._emergency_fallback_cfg.get("max_consecutive_uses") or 0)
+            if not is_enabled_trigger(trigger, configured):
+                return False
+            if max_uses and self._emergency_fallback_uses >= max_uses:
+                self._emit_structured_status("fallback", {
+                    "from_model": self.model,
+                    "to_model": fb.get("model"),
+                    "provider": fb.get("provider"),
+                    "trigger": trigger,
+                    "action": "blocked_max_uses",
+                })
+                return False
+            self._emergency_fallback_uses += 1
         fb_provider = (fb.get("provider") or "").strip().lower()
         fb_model = (fb.get("model") or "").strip()
         if not fb_provider or not fb_model:
@@ -8185,6 +8305,13 @@ class AIAgent:
                 f"🔄 Primary model failed — switching to fallback: "
                 f"{fb_model} via {fb_provider}"
             )
+            self._emit_structured_status("fallback", {
+                "from_model": old_model,
+                "to_model": fb_model,
+                "provider": fb_provider,
+                "trigger": trigger_for_error(Exception(str(reason or "")), reason=reason),
+                "emergency": bool(fb.get("_emergency")),
+            })
             logging.info(
                 "Fallback activated: %s → %s (%s)",
                 old_model, fb_model, fb_provider,
@@ -11036,6 +11163,9 @@ class AIAgent:
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
 
+        self._emit_profile_state()
+        self._maybe_apply_adaptive_routing(user_message)
+
         # Store stream callback for _interruptible_api_call to pick up
         self._stream_callback = stream_callback
         self._persist_user_message_idx = None
@@ -12333,7 +12463,21 @@ class AIAgent:
                             api_key=getattr(self, "api_key", ""),
                         )
                         if cost_result.amount_usd is not None:
-                            self.session_estimated_cost_usd += float(cost_result.amount_usd)
+                            amount_usd = float(cost_result.amount_usd)
+                            self.session_estimated_cost_usd += amount_usd
+                            try:
+                                snapshots = record_spend(
+                                    self._spend_governance_cfg,
+                                    amount_usd=amount_usd,
+                                    session_id=self.session_id,
+                                    parent_session_id=getattr(self, "_parent_session_id", None),
+                                    model=self.model,
+                                    provider=self.provider,
+                                )
+                                for payload in snapshots_to_payloads(snapshots):
+                                    self._emit_structured_status("spend", payload)
+                            except Exception:
+                                logger.debug("spend governance persistence failed", exc_info=True)
                         self.session_cost_status = cost_result.status
                         self.session_cost_source = cost_result.source
 

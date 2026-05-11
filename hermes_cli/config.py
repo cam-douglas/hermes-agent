@@ -393,6 +393,10 @@ def _ensure_hermes_home_managed(home: Path):
 # =============================================================================
 
 DEFAULT_CONFIG = {
+    "hermes_features": {
+        "handover_schema": 4,
+    },
+
     "model": "",
     "providers": {},
     "fallback_providers": [],
@@ -871,6 +875,10 @@ DEFAULT_CONFIG = {
         "runtime_footer": {
             "enabled": False,
             "fields": ["model", "context_pct", "cwd"],  # Order shown; drop any to hide
+            "show_routing": False,
+            "show_spend": False,
+            "show_fallback": False,
+            "show_profile_mode": False,
         },
         "copy_shortcut": "auto",  # "auto" (platform default) | "ctrl_c" | "ctrl_shift_c" | "disabled"
     },
@@ -989,6 +997,66 @@ DEFAULT_CONFIG = {
         "provider": "",
     },
 
+    "adaptive_routing": {
+        "enabled": False,
+        "provider": "openrouter",
+        "baseline_model": "openai/gpt-5.4-mini",
+        "router_model": "openai/gpt-5.5",
+        "consultant_models_allowlist": [],
+        "router_outputs_user_text": False,
+        "router_timeout_seconds": 45,
+        "router_max_retries": 1,
+        "models": {},
+        "observability_channel": "footer",
+        "on_router_failure": "baseline",
+        "clamp_delegates": True,
+        "cron_disable_consultant": True,
+    },
+
+    "emergency_fallback": {
+        "enabled": False,
+        "provider": "openrouter",
+        "model": "",
+        "trigger_on": ["rate_limit", "quota_exceeded", "billing_error"],
+        "reset_policy": "next_session",
+        "max_consecutive_uses": 20,
+    },
+
+    "spend_governance": {
+        "enabled": False,
+        "currency": "USD",
+        "estimate_using": "model_table",
+        "aggregate_delegation": True,
+        "persist_path": "",
+        "soft_cap": {
+            "per_turn_usd": None,
+            "per_day_usd": None,
+            "per_month_usd": None,
+        },
+        "hard_cap": {
+            "per_turn_usd": None,
+            "per_day_usd": None,
+            "per_month_usd": None,
+        },
+        "on_soft_cap": "warn_footer",
+        "on_hard_cap": "block_consultant",
+    },
+
+    "profile_routing": {
+        "enabled": False,
+        "prefer_ephemeral": True,
+        "ephemeral_ttl_hours": None,
+        "ephemeral_mark_file": ".ephemeral_profile",
+        "hr_consultant_profile": None,
+        "org_registry_path": "",
+    },
+
+    "org_escalation": {
+        "enabled": False,
+        "require_consultant_approval": True,
+        "chief_router_model": "",
+    },
+
     # Subagent delegation — override the provider:model used by delegate_task
     # so child agents can run on a different (cheaper/faster) provider and model.
     # Uses the same runtime provider resolution as CLI/gateway startup, so all
@@ -1017,6 +1085,9 @@ DEFAULT_CONFIG = {
         # and _get_orchestrator_enabled).  Values are clamped to [1, 3] with a
         # warning log if out of range.
         "max_spawn_depth": 1,        # depth cap (1 = flat [default], 2 = orchestrator→leaf, 3 = three-level)
+        "max_depth": 3,              # handover v4 alias for policy checks (delegation.max_spawn_depth still drives runtime)
+        "leaf_may_delegate": False,
+        "orchestrator_toolset": "orchestrator",
         "orchestrator_enabled": True,  # kill switch for role="orchestrator"
         # When a subagent hits a dangerous-command approval prompt, the parent's
         # prompt_toolkit TUI owns stdin — a thread-local input() call from the
@@ -1263,6 +1334,7 @@ DEFAULT_CONFIG = {
     # each claimable ready task. One dispatcher per profile is sufficient;
     # running more than one on the same kanban.db will race for claims.
     "kanban": {
+        "orchestrator_mode": False,
         # Run the dispatcher inside the gateway process. On by default —
         # the cost is ~300µs every `dispatch_interval_seconds` when idle,
         # and gateway is the supervisor users already have. Set to false
@@ -1382,7 +1454,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 23,
+    "_config_version": 24,
 }
 
 # =============================================================================
@@ -2590,6 +2662,61 @@ def get_missing_config_fields() -> List[Dict[str, Any]]:
     return missing
 
 
+def ensure_handover_v4_config_defaults(quiet: bool = False) -> List[str]:
+    """Persist handover v4 default blocks into config.yaml when absent.
+
+    ``load_config()`` deep-merges defaults at runtime, but the handover rollout
+    explicitly wants ``hermes config migrate`` to materialize the new disabled
+    blocks so operators can audit and enable them intentionally on the droplet.
+    """
+    raw = read_raw_config()
+    if not isinstance(raw, dict):
+        raw = {}
+    config = load_config()
+    added: List[str] = []
+
+    default_paths = (
+        "hermes_features.handover_schema",
+        "display.runtime_footer.show_routing",
+        "display.runtime_footer.show_spend",
+        "display.runtime_footer.show_fallback",
+        "display.runtime_footer.show_profile_mode",
+        "adaptive_routing",
+        "emergency_fallback",
+        "spend_governance",
+        "profile_routing",
+        "org_escalation",
+        "delegation.max_depth",
+        "delegation.leaf_may_delegate",
+        "delegation.orchestrator_toolset",
+        "kanban.orchestrator_mode",
+    )
+
+    def _get_path(obj: dict, dotted: str):
+        cur: Any = obj
+        for part in dotted.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return None
+            cur = cur[part]
+        return cur
+
+    for dotted in default_paths:
+        if _get_path(raw, dotted) is not None:
+            continue
+        default = _get_path(DEFAULT_CONFIG, dotted)
+        if default is None:
+            continue
+        _set_nested(config, dotted, copy.deepcopy(default))
+        added.append(dotted)
+
+    if added:
+        save_config(config)
+        if not quiet:
+            for key in added:
+                print(f"  ✓ Added handover v4 default: {key}")
+    return added
+
+
 def get_missing_skill_config_vars() -> List[Dict[str, Any]]:
     """Return skill-declared config vars that are missing or empty in config.yaml.
 
@@ -2911,7 +3038,9 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
-    "sessions",
+    "sessions", "hermes_features", "adaptive_routing",
+    "emergency_fallback", "spend_governance", "profile_routing",
+    "org_escalation", "kanban",
 }
 
 # Valid fields inside a custom_providers list entry
@@ -3573,6 +3702,12 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                         "  ✓ Seeded auxiliary.curator defaults in config.yaml: "
                         f"{', '.join(added_aux)}"
                     )
+
+    # ── Version 23 → 24: materialize handover v4 default-off blocks ──
+    if current_ver < 24:
+        added = ensure_handover_v4_config_defaults(quiet=quiet)
+        if added:
+            results["config_added"].extend(added)
 
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")

@@ -1035,6 +1035,17 @@ def _build_child_agent(
         effective_acp_command = None
         effective_acp_args = []
 
+    try:
+        from hermes_cli.config import load_config as _load_full_config
+
+        adaptive_cfg = (_load_full_config().get("adaptive_routing") or {})
+        if adaptive_cfg.get("enabled") and adaptive_cfg.get("clamp_delegates", True):
+            baseline = str(adaptive_cfg.get("baseline_model") or "").strip()
+            if baseline:
+                effective_model = baseline
+    except Exception:
+        pass
+
     if override_acp_command:
         # If explicitly forcing an ACP transport override, the provider MUST be copilot-acp
         # so run_agent.py initializes the CopilotACPClient.
