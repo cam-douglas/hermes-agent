@@ -134,12 +134,33 @@ def _doctor_tool_availability_detail(toolset: str) -> str:
     return ""
 
 
+def _doctor_skip_toolset_ids() -> set[str]:
+    """Toolsets to omit from doctor \"unavailable\" warnings.
+
+    ``HERMES_DOCTOR_SKIP_TOOLSETS`` adds explicit skips (comma-separated).
+    ``HERMES_DOCTOR_STRICT_INTEGRATIONS=1`` disables the default skip list for
+    Spotify/Discord so missing OAuth/tokens surface again.
+
+    ``computer_use`` is always skipped on non-macOS (macOS-only toolset).
+    """
+    skip_ids = {s.strip() for s in os.environ.get("HERMES_DOCTOR_SKIP_TOOLSETS", "").split(",") if s.strip()}
+    if sys.platform != "darwin":
+        skip_ids.add("computer_use")
+    if os.environ.get("HERMES_DOCTOR_STRICT_INTEGRATIONS", "").strip() != "1":
+        skip_ids.update({"discord", "discord_admin", "spotify"})
+    return skip_ids
+
+
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
     """Adjust runtime-gated tool availability for doctor diagnostics."""
+    skip_ids = _doctor_skip_toolset_ids()
+
     updated_available = list(available)
     updated_unavailable = []
     for item in unavailable:
         name = item.get("name")
+        if name in skip_ids:
+            continue
         if _is_kanban_worker_env_gate(item):
             if "kanban" not in updated_available:
                 updated_available.append("kanban")
@@ -347,7 +368,12 @@ def run_doctor(args):
             check_fail(name, "(missing)")
             issues.append(f"Install {name}: {_python_install_cmd()} {module}")
     
+    _skip_optional_integration_pkgs = _doctor_skip_toolset_ids()
     for module, name in optional_packages:
+        if module == "discord" and (
+            "discord" in _skip_optional_integration_pkgs or "discord_admin" in _skip_optional_integration_pkgs
+        ):
+            continue
         try:
             __import__(module)
             check_ok(name, "(optional)")
@@ -1505,6 +1531,14 @@ def run_doctor(args):
             if mem0_key:
                 check_ok("Mem0 API key configured")
                 check_info(f"user_id={mem0_cfg.get('user_id', '?')}  agent_id={mem0_cfg.get('agent_id', '?')}")
+                _aux_mem_env = [
+                    ("LANGSMITH_API_KEY", "LangSmith"),
+                    ("ZEP_API_KEY", "Zep"),
+                    ("LETTA_API_KEY", "Letta"),
+                ]
+                for _envk, _label in _aux_mem_env:
+                    if os.environ.get(_envk, "").strip():
+                        check_ok(f"{_label} env present", f"({_envk} — auxiliary; Hermes memory calls use Mem0 only)")
             else:
                 check_fail("Mem0 API key not set", "(set MEM0_API_KEY in .env or run hermes memory setup)")
                 issues.append("Mem0 is set as memory provider but API key is missing")
@@ -1513,6 +1547,36 @@ def run_doctor(args):
             issues.append("Mem0 is set as memory provider but mem0ai is not installed")
         except Exception as _e:
             check_warn("Mem0 check failed", str(_e))
+    elif _active_memory_provider == "lancedb":
+        try:
+            import lancedb  # noqa: F401
+            from plugins.memory.lancedb import _load_lancedb_config
+
+            lcfg = _load_lancedb_config()
+            check_ok("LanceDB package installed")
+            check_info(f"uri={lcfg.get('uri', '?')}")
+            if lcfg.get("embedding_api_key"):
+                check_ok("Embedding API key configured", f"(model={lcfg.get('embedding_model', '?')}, dim={lcfg.get('embedding_dim', '?')})")
+            else:
+                check_warn(
+                    "No embedding API key",
+                    "(vector search disabled — set OPENAI_API_KEY or LANCEDB_EMBEDDING_API_KEY for semantic recall; keyword fallback still works)",
+                )
+            uri_path = Path(str(lcfg.get("uri", "")))
+            if not str(lcfg.get("uri", "")):
+                check_warn("LanceDB uri empty", "(unexpected — check config)")
+            elif not uri_path.parent.exists():
+                try:
+                    uri_path.parent.mkdir(parents=True, exist_ok=True)
+                    check_ok("LanceDB parent directory ready", str(uri_path.parent))
+                except Exception as _e:
+                    check_fail("Cannot create LanceDB directory", str(_e))
+                    issues.append(f"LanceDB path not writable: {uri_path}")
+        except ImportError:
+            check_fail("lancedb not installed", "uv pip install 'lancedb>=0.15.0,<1' or pip install hermes-agent[lancedb]")
+            issues.append("memory.provider is lancedb but the lancedb package is missing")
+        except Exception as _e:
+            check_warn("LanceDB check failed", str(_e))
     else:
         # Generic check for other memory providers (openviking, hindsight, etc.)
         try:

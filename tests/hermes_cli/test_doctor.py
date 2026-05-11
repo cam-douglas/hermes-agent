@@ -167,6 +167,26 @@ class TestDoctorToolAvailabilityOverrides:
 
         assert doctor._doctor_tool_availability_detail("kanban") == "(runtime-gated; loaded only for dispatcher-spawned workers)"
 
+    def test_default_skip_hides_discord_spotify_toolsets(self, monkeypatch):
+        monkeypatch.setattr(doctor, "_honcho_is_configured_for_doctor", lambda: False)
+        monkeypatch.delenv("HERMES_DOCTOR_STRICT_INTEGRATIONS", raising=False)
+        monkeypatch.delenv("HERMES_DOCTOR_SKIP_TOOLSETS", raising=False)
+
+        discord_entry = {"name": "discord", "env_vars": ["DISCORD_BOT_TOKEN"], "tools": ["discord"]}
+        available, unavailable = doctor._apply_doctor_tool_availability_overrides([], [discord_entry])
+
+        assert unavailable == []
+
+    def test_strict_integrations_shows_discord_toolset(self, monkeypatch):
+        monkeypatch.setattr(doctor, "_honcho_is_configured_for_doctor", lambda: False)
+        monkeypatch.setenv("HERMES_DOCTOR_STRICT_INTEGRATIONS", "1")
+        monkeypatch.delenv("HERMES_DOCTOR_SKIP_TOOLSETS", raising=False)
+
+        discord_entry = {"name": "discord", "env_vars": ["DISCORD_BOT_TOKEN"], "tools": ["discord"]}
+        available, unavailable = doctor._apply_doctor_tool_availability_overrides([], [discord_entry])
+
+        assert unavailable == [discord_entry]
+
 
 class TestHonchoDoctorConfigDetection:
     def test_reports_configured_when_enabled_with_api_key(self, monkeypatch):
