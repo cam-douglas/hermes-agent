@@ -5562,6 +5562,19 @@ class HermesCLI:
         else:
             _cprint(f"  ↻ Resumed session {target_id}{title_part} — no messages, starting fresh.")
 
+    def _handle_sessions_command(self, cmd_original: str) -> None:
+        """Handle /sessions — list recent sessions, or resume a provided target."""
+        parts = cmd_original.split(None, 1)
+        target = parts[1].strip() if len(parts) > 1 else ""
+        if target:
+            self._handle_resume_command(f"/resume {target}")
+            return
+
+        if self._show_recent_sessions(reason="resume", limit=20):
+            return
+        _cprint("  No previous sessions found.")
+        _cprint("  Tip: use /title <name> to make future sessions easier to resume.")
+
     def _handle_branch_command(self, cmd_original: str) -> None:
         """Handle /branch [name] — fork the current session into a new independent copy.
 
@@ -6872,6 +6885,8 @@ class HermesCLI:
             self.new_session(title=title)
         elif canonical == "resume":
             self._handle_resume_command(cmd_original)
+        elif canonical == "sessions":
+            self._handle_sessions_command(cmd_original)
         elif canonical == "model":
             self._handle_model_switch(cmd_original)
         elif canonical == "gquota":
