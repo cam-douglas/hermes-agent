@@ -517,7 +517,14 @@ class SlackAdapter(BasePlatformAdapter):
             "text": text,
         }
         try:
-            async with aiohttp.ClientSession() as session:
+            # Must use the same CA bundle as AsyncWebClient — plain ClientSession()
+            # uses the broken default store on python.org macOS and the POST to
+            # hooks.slack.com silently fails, leaving users stuck on "Running…".
+            _ssl = _slack_ssl_context_for_aiohttp()
+            _sess_kw: dict[str, Any] = {}
+            if _ssl is not None:
+                _sess_kw["connector"] = aiohttp.TCPConnector(ssl=_ssl)
+            async with aiohttp.ClientSession(**_sess_kw) as session:
                 async with session.post(
                     ctx["response_url"],
                     json=payload,
