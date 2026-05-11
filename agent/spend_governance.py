@@ -106,6 +106,32 @@ def snapshots_to_payloads(snapshots: list[SpendSnapshot]) -> list[dict[str, Any]
     return payloads
 
 
+def read_spend_snapshots(
+    config: Mapping[str, Any],
+    *,
+    session_id: str | None,
+    parent_session_id: str | None,
+) -> list[SpendSnapshot]:
+    """Read current turn/day/month spend totals without recording a new event."""
+    if not config.get("enabled"):
+        return []
+
+    path = spend_db_path(config)
+    rollup_session = parent_session_id if config.get("aggregate_delegation", True) and parent_session_id else session_id
+    with _connect(path) as conn:
+        soft = config.get("soft_cap") if isinstance(config.get("soft_cap"), dict) else {}
+        hard = config.get("hard_cap") if isinstance(config.get("hard_cap"), dict) else {}
+        periods = [
+            ("turn", _turn_total(conn, rollup_session), soft.get("per_turn_usd"), hard.get("per_turn_usd")),
+            ("day", _period_total(conn, "day"), soft.get("per_day_usd"), hard.get("per_day_usd")),
+            ("month", _period_total(conn, "month"), soft.get("per_month_usd"), hard.get("per_month_usd")),
+        ]
+    return [
+        SpendSnapshot(p, float(total or 0.0), _to_float(s), _to_float(h))
+        for p, total, s, h in periods
+    ]
+
+
 def _turn_total(conn: sqlite3.Connection, session_id: str | None) -> float:
     if not session_id:
         return 0.0

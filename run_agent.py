@@ -166,7 +166,7 @@ from agent.adaptive_routing import (
     resolve_route as resolve_adaptive_route,
     status_payload as routing_status_payload,
 )
-from agent.spend_governance import record_spend, snapshots_to_payloads
+from agent.spend_governance import record_spend, read_spend_snapshots, snapshots_to_payloads
 from agent.fallback_triggers import is_enabled_trigger, trigger_for_error
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -2862,6 +2862,48 @@ class AIAgent:
         )
         return response.choices[0].message.content or ""
 
+    def _current_profile_name(self) -> str:
+        try:
+            from hermes_cli.profiles import get_active_profile
+            name = get_active_profile()
+            if name:
+                return name
+        except Exception:
+            pass
+        return get_hermes_home().name or "default"
+
+    def _spend_governance_preflight(self) -> None:
+        """Update turn spend state before routing/model selection."""
+        cfg = self._spend_governance_cfg
+        if not cfg.get("enabled"):
+            self._spend_hard_cap_block_consultant = False
+            return
+
+        try:
+            snapshots = read_spend_snapshots(
+                cfg,
+                session_id=self.session_id,
+                parent_session_id=getattr(self, "_parent_session_id", None),
+            )
+            self._spend_hard_cap_block_consultant = False
+            if not snapshots:
+                return
+            on_soft = str(cfg.get("on_soft_cap") or "warn_footer")
+            on_hard = str(cfg.get("on_hard_cap") or "block_consultant")
+            for payload in snapshots_to_payloads(snapshots):
+                if payload.get("period") == "turn":
+                    hard = payload.get("hard_cap_usd")
+                    spent = payload.get("spent_usd_est")
+                    if hard is not None and spent is not None and float(spent) >= float(hard):
+                        self._spend_hard_cap_block_consultant = on_hard == "block_consultant"
+                if payload.get("soft_cap_usd") is not None and payload.get("spent_usd_est") is not None:
+                    if on_soft == "warn_footer":
+                        self._emit_structured_status("spend", payload)
+                if payload.get("hard_cap_usd") is not None and payload.get("spent_usd_est") is not None:
+                    self._emit_structured_status("spend", payload)
+        except Exception:
+            logger.debug("spend governance preflight failed", exc_info=True)
+
     def _maybe_apply_adaptive_routing(self, user_message: str) -> None:
         """Resolve and apply a per-turn model route when enabled."""
         cfg = self._adaptive_routing_cfg
@@ -2877,11 +2919,76 @@ class AIAgent:
         if cfg.get("observability_channel", "footer") != "none":
             self._emit_structured_status("routing", routing_status_payload(decision))
 
-        if decision.tier == "consultant":
+        org_cfg = self._org_escalation_cfg
+        require_org_approval = bool(org_cfg.get("enabled") and org_cfg.get("require_consultant_approval", True))
+        consultant_approved = bool(decision.approval)
+        if decision.tier == "consultant" and require_org_approval:
+            consultant_approved = bool(
+                self._consultant_approval
+                and self._consultant_approval.get("approved")
+                and (
+                    not self._consultant_approval.get("target_model")
+                    or self._consultant_approval.get("target_model") == decision.target_model
+                )
+            )
+            if not consultant_approved:
+                self._emit_structured_status("escalation", {
+                    "phase": "denied",
+                    "target_model": decision.target_model,
+                    "approved": False,
+                    "reason_code": "pending_router",
+                    "trace_id": self.session_id,
+                })
+                decision = type(decision)(
+                    tier="baseline",
+                    target_model=str(cfg.get("baseline_model") or self.model),
+                    reason_code="org_approval_required",
+                    approval=None,
+                    router_notes=decision.router_notes,
+                    router_model=decision.router_model,
+                    latency_ms=decision.latency_ms,
+                    error=decision.error,
+                )
+
+        if decision.tier == "consultant" and getattr(self, "_spend_hard_cap_block_consultant", False):
+            self._emit_structured_status("spend", {
+                "scope": "spend",
+                "period": "turn",
+                "spent_usd_est": None,
+                "soft_cap_usd": None,
+                "hard_cap_usd": None,
+                "proximity": None,
+                "action": "block_consultant",
+            })
             self._emit_structured_status("escalation", {
-                "phase": "approved" if decision.approval else "denied",
+                "phase": "denied",
                 "target_model": decision.target_model,
-                "approved": bool(decision.approval),
+                "approved": False,
+                "reason_code": "hard_cap_block_consultant",
+                "trace_id": self.session_id,
+            })
+            decision = type(decision)(
+                tier="baseline",
+                target_model=str(cfg.get("baseline_model") or self.model),
+                reason_code="hard_cap_block_consultant",
+                approval=None,
+                router_notes=decision.router_notes,
+                router_model=decision.router_model,
+                latency_ms=decision.latency_ms,
+                error=decision.error,
+            )
+
+        if decision.tier == "consultant":
+            self._consultant_approval = {
+                "approved": consultant_approved,
+                "target_model": decision.target_model,
+                "reason_code": decision.reason_code,
+                "trace_id": self.session_id,
+            }
+            self._emit_structured_status("escalation", {
+                "phase": "approved" if consultant_approved else "denied",
+                "target_model": decision.target_model,
+                "approved": consultant_approved,
                 "reason_code": decision.reason_code,
                 "trace_id": self.session_id,
             })
@@ -2897,7 +3004,7 @@ class AIAgent:
         ttl = cfg.get("ephemeral_ttl_hours")
         payload: Dict[str, Any] = {
             "scope": "profile",
-            "name": get_hermes_home().name,
+            "name": self._current_profile_name(),
             "ephemeral": marker.exists(),
             "ttl_hours_remaining": None,
         }
@@ -11163,7 +11270,9 @@ class AIAgent:
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
 
+        self._spend_governance_preflight()
         self._emit_profile_state()
+        self._spend_governance_preflight()
         self._maybe_apply_adaptive_routing(user_message)
 
         # Store stream callback for _interruptible_api_call to pick up

@@ -26,6 +26,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional
@@ -361,6 +362,8 @@ class ProfileInfo:
     distribution_name: Optional[str] = None
     distribution_version: Optional[str] = None
     distribution_source: Optional[str] = None
+    ephemeral: bool = False
+    ttl_hours_remaining: Optional[float] = None
 
 
 def _read_distribution_meta(profile_dir: Path) -> tuple:
@@ -432,6 +435,32 @@ def _count_skills(profile_dir: Path) -> int:
 # CRUD operations
 # ---------------------------------------------------------------------------
 
+def _read_ephemeral_marker(profile_dir: Path) -> tuple[bool, Optional[float]]:
+    marker = profile_dir / ".ephemeral_profile"
+    if not marker.is_file():
+        return False, None
+    ttl_hours: Optional[float] = None
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8") or "{}")
+        ttl_raw = data.get("ttl_hours")
+        if ttl_raw is not None:
+            ttl_hours = float(ttl_raw)
+    except Exception:
+        ttl_hours = None
+    return True, ttl_hours
+
+
+def _ephemeral_ttl_remaining(profile_dir: Path, ttl_hours: Optional[float]) -> Optional[float]:
+    if ttl_hours is None:
+        return None
+    marker = profile_dir / ".ephemeral_profile"
+    try:
+        age_h = (time.time() - marker.stat().st_mtime) / 3600
+        return max(0.0, float(ttl_hours) - age_h)
+    except Exception:
+        return None
+
+
 def list_profiles() -> List[ProfileInfo]:
     """Return info for all profiles, including the default."""
     profiles = []
@@ -442,6 +471,7 @@ def list_profiles() -> List[ProfileInfo]:
     if default_home.is_dir():
         model, provider = _read_config_model(default_home)
         dist_name, dist_version, dist_source = _read_distribution_meta(default_home)
+        ephemeral, ttl_hours = _read_ephemeral_marker(default_home)
         profiles.append(ProfileInfo(
             name="default",
             path=default_home,
@@ -454,6 +484,8 @@ def list_profiles() -> List[ProfileInfo]:
             distribution_name=dist_name,
             distribution_version=dist_version,
             distribution_source=dist_source,
+            ephemeral=ephemeral,
+            ttl_hours_remaining=_ephemeral_ttl_remaining(default_home, ttl_hours),
         ))
 
     # Named profiles
@@ -468,6 +500,7 @@ def list_profiles() -> List[ProfileInfo]:
             model, provider = _read_config_model(entry)
             alias_path = wrapper_dir / name
             dist_name, dist_version, dist_source = _read_distribution_meta(entry)
+            ephemeral, ttl_hours = _read_ephemeral_marker(entry)
             profiles.append(ProfileInfo(
                 name=name,
                 path=entry,
@@ -481,6 +514,8 @@ def list_profiles() -> List[ProfileInfo]:
                 distribution_name=dist_name,
                 distribution_version=dist_version,
                 distribution_source=dist_source,
+                ephemeral=ephemeral,
+                ttl_hours_remaining=_ephemeral_ttl_remaining(entry, ttl_hours),
             ))
 
     return profiles
@@ -683,6 +718,38 @@ def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict
         if not quiet:
             print(f"⚠ Skill seeding failed: {e}")
         return None
+
+
+def gc_ephemeral_profiles(*, dry_run: bool = False) -> List[Path]:
+    """Delete expired ephemeral profiles under the named-profile root.
+
+    A profile is considered eligible when it contains ``.ephemeral_profile`` and
+    its marker TTL has expired. Profiles without a TTL are left untouched.
+    Returns the list of deleted profile directories.
+    """
+    deleted: List[Path] = []
+    root = _get_profiles_root()
+    if not root.is_dir():
+        return deleted
+
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or not _PROFILE_ID_RE.match(entry.name):
+            continue
+        ephemeral, ttl_hours = _read_ephemeral_marker(entry)
+        if not ephemeral:
+            continue
+        ttl_remaining = _ephemeral_ttl_remaining(entry, ttl_hours)
+        if ttl_remaining is None or ttl_remaining > 0:
+            continue
+        if dry_run:
+            deleted.append(entry)
+            continue
+        try:
+            delete_profile(entry.name, yes=True)
+            deleted.append(entry)
+        except Exception:
+            continue
+    return deleted
 
 
 def delete_profile(name: str, yes: bool = False) -> Path:

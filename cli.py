@@ -1347,17 +1347,30 @@ def _preserve_windows_dot_segments_for_markdown(text: str) -> str:
     return _WINDOWS_PATH_WITH_DOT_SEGMENT_RE.sub(_protect, text)
 
 
+_MEDIA_TAG_RE = re.compile(r'''[`"']?MEDIA:\s*\S+[`"']?''')
+
+
+def _strip_media_tags(text: str) -> str:
+    """Remove MEDIA tags from local CLI display output.
+
+    Messaging adapters handle MEDIA:native delivery; the local terminal must
+    never show raw MEDIA: directives as literal text.
+    """
+    return _MEDIA_TAG_RE.sub("", text or "").strip()
+
+
 def _render_final_assistant_content(text: str, mode: str = "render"):
     """Render final assistant content as markdown, stripped text, or raw text."""
     from rich.markdown import Markdown
 
+    cleaned_text = _strip_media_tags(text)
     normalized_mode = str(mode or "render").strip().lower()
     if normalized_mode == "strip":
-        return _RichText(_strip_markdown_syntax(text))
+        return _RichText(_strip_markdown_syntax(cleaned_text))
     if normalized_mode == "raw":
-        return _rich_text_from_ansi(text or "")
+        return _rich_text_from_ansi(cleaned_text or "")
 
-    plain = _rich_text_from_ansi(text or "").plain
+    plain = _rich_text_from_ansi(cleaned_text or "").plain
     plain = _preserve_windows_dot_segments_for_markdown(plain)
     return Markdown(plain)
 

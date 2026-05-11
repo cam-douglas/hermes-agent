@@ -8430,6 +8430,25 @@ def cmd_profile(args):
             print(f"Error: {e}")
             sys.exit(1)
 
+    elif action == "gc-ephemeral":
+        dry_run = getattr(args, "dry_run", False)
+        yes = getattr(args, "yes", False)
+        try:
+            from hermes_cli.profiles import gc_ephemeral_profiles
+            expired = gc_ephemeral_profiles(dry_run=True)
+            if not expired:
+                print("No expired ephemeral profiles found.")
+            else:
+                print("Expired ephemeral profiles:")
+                for p in expired:
+                    print(f"  - {p}")
+                if not dry_run and yes:
+                    deleted = gc_ephemeral_profiles(dry_run=False)
+                    print(f"Deleted {len(deleted)} profile(s).")
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
     elif action == "show":
         name = args.profile_name
         from hermes_cli.profiles import (
@@ -8439,6 +8458,8 @@ def cmd_profile(args):
             _check_gateway_running,
             _count_skills,
             _read_distribution_meta,
+            _read_ephemeral_marker,
+            _ephemeral_ttl_remaining,
         )
 
         if not profile_exists(name):
@@ -8457,19 +8478,20 @@ def cmd_profile(args):
             print(f"Model:   {model}" + (f" ({provider})" if provider else ""))
         print(f"Gateway: {'running' if gw else 'stopped'}")
         print(f"Skills:  {skills}")
-        print(
-            f".env:    {'exists' if (profile_dir / '.env').exists() else 'not configured'}"
-        )
-        print(
-            f"SOUL.md: {'exists' if (profile_dir / 'SOUL.md').exists() else 'not configured'}"
-        )
+        ephemeral, ttl_hours = _read_ephemeral_marker(profile_dir)
+        if ephemeral:
+            ttl_rem = _ephemeral_ttl_remaining(profile_dir, ttl_hours)
+            ttl_text = f", ttl remaining: {ttl_rem:.1f}h" if ttl_rem is not None else ""
+            print(f"Ephemeral: yes{ttl_text}")
+        print(f".env:    {'exists' if (profile_dir / '.env').exists() else 'not configured'}")
+        print(f"SOUL.md: {'exists' if (profile_dir / 'SOUL.md').exists() else 'not configured'}")
         if dist_name:
             print(f"Distribution: {dist_name}@{dist_version or '?'}")
             if dist_source:
                 print(f"Installed from: {dist_source}")
-            print(f"  (run `hermes profile info {name}` for full manifest)")
         if wrapper.exists():
             print(f"Alias:   {wrapper}")
+        print(f"  (run `hermes profile info {name}` for full manifest)")
         print()
 
     elif action == "alias":
@@ -11108,6 +11130,16 @@ Examples:
     profile_delete.add_argument("profile_name", help="Profile to delete")
     profile_delete.add_argument(
         "-y", "--yes", action="store_true", help="Skip confirmation prompt"
+    )
+
+    profile_gc = profile_subparsers.add_parser(
+        "gc-ephemeral", help="Delete expired ephemeral profiles"
+    )
+    profile_gc.add_argument(
+        "--dry-run", action="store_true", help="List expired profiles without deleting"
+    )
+    profile_gc.add_argument(
+        "--yes", action="store_true", help="Skip confirmation prompt"
     )
 
     profile_show = profile_subparsers.add_parser("show", help="Show profile details")

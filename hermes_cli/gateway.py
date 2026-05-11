@@ -5,6 +5,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
 
 import asyncio
+import logging
 import os
 import shutil
 import signal
@@ -13,6 +14,8 @@ import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
@@ -1901,7 +1904,19 @@ def _build_user_local_paths(home: Path, path_entries: list[str]) -> list[str]:
         str(home / "go" / "bin"),            # Go tools
         str(home / ".npm-global" / "bin"),   # npm global packages
     ]
-    return [p for p in candidates if p not in path_entries and Path(p).exists()]
+
+    existing: list[str] = []
+    for candidate in candidates:
+        if candidate in path_entries:
+            continue
+        try:
+            if Path(candidate).exists():
+                existing.append(candidate)
+        except PermissionError:
+            logging.getLogger(__name__).debug("Systemd PATH candidate inaccessible: %s", candidate)
+        except OSError as exc:
+            logging.getLogger(__name__).debug("Systemd PATH candidate check failed for %s: %s", candidate, exc)
+    return existing
 
 
 def _build_wsl_interop_paths(path_entries: list[str]) -> list[str]:

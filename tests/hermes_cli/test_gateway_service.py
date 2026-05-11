@@ -1148,7 +1148,7 @@ class TestSystemUnitHermesHome:
     def test_system_unit_uses_target_user_home_not_calling_user(self, monkeypatch):
         # Simulate sudo: Path.home() returns /root, target user is alice
         monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/root")))
-        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: Path("/root/.hermes"))
         monkeypatch.setattr(
             gateway_cli, "_system_service_identity",
             lambda run_as_user=None: ("alice", "alice", "/home/alice"),
@@ -1166,7 +1166,7 @@ class TestSystemUnitHermesHome:
     def test_system_unit_remaps_profile_to_target_user(self, monkeypatch):
         # Simulate sudo with a profile: HERMES_HOME was resolved under root
         monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/root")))
-        monkeypatch.setenv("HERMES_HOME", "/root/.hermes/profiles/coder")
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: Path("/root/.hermes/profiles/coder"))
         monkeypatch.setattr(
             gateway_cli, "_system_service_identity",
             lambda run_as_user=None: ("alice", "alice", "/home/alice"),
@@ -1181,10 +1181,29 @@ class TestSystemUnitHermesHome:
         assert 'HERMES_HOME=/home/alice/.hermes/profiles/coder' in unit
         assert '/root/' not in unit
 
+    def test_system_unit_ignores_inaccessible_user_local_paths(self, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/root")))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: Path("/root/.hermes"))
+        monkeypatch.setattr(
+            gateway_cli, "_system_service_identity",
+            lambda run_as_user=None: ("alice", "alice", "/home/alice"),
+        )
+
+        def fake_exists(self):
+            if str(self).endswith("/.local/bin"):
+                raise PermissionError("simulated")
+            return False
+
+        monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+
+        unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="alice")
+
+        assert 'HERMES_HOME=/home/alice/.hermes' in unit
+
     def test_system_unit_preserves_custom_hermes_home(self, monkeypatch):
         # Custom HERMES_HOME not under any user's home — keep as-is
         monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/root")))
-        monkeypatch.setenv("HERMES_HOME", "/opt/hermes-shared")
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: Path("/opt/hermes-shared"))
         monkeypatch.setattr(
             gateway_cli, "_system_service_identity",
             lambda run_as_user=None: ("alice", "alice", "/home/alice"),
