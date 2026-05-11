@@ -29,6 +29,36 @@ class AdaptiveRoutingError(ValueError):
     """Raised for invalid router output or unsafe consultant selection."""
 
 
+# Router often echoes the tier name instead of a real OpenRouter slug; never send these to the API.
+_BASELINE_PLACEHOLDERS = frozenset(
+    {"baseline", "base", "default", "primary", "cheap", "fast"}
+)
+
+
+def _coerce_router_target_to_slug(
+    *,
+    tier: str,
+    target_model: str,
+    baseline: str,
+    current_model: str,
+    consultant_allowlist: list[str],
+) -> str:
+    """Map tier-label mistakes to the configured baseline (or allowlisted) model slug."""
+    raw = (target_model or "").strip()
+    fallback = (baseline or current_model or "").strip() or current_model
+    if not raw:
+        return fallback
+    key = raw.casefold()
+    if key in _BASELINE_PLACEHOLDERS or key == "consultant":
+        if tier == "consultant" and consultant_allowlist:
+            if key == "consultant" and len(consultant_allowlist) == 1:
+                return consultant_allowlist[0].strip()
+            if key in _BASELINE_PLACEHOLDERS:
+                return fallback
+        return fallback
+    return raw
+
+
 def _strip_json_fence(text: str) -> str:
     raw = (text or "").strip()
     if raw.startswith("```"):
@@ -138,10 +168,16 @@ def resolve_route(
             router_model=router_model,
         )
 
+    baseline_example = baseline if "/" in baseline else "openai/gpt-4.1-mini"
     prompt = (
         "You are a Hermes model router. Return JSON only with keys "
-        "tier, target_model, reason_code, approval, router_notes. Choose "
-        "tier=baseline unless the task clearly needs a consultant model."
+        "tier, target_model, reason_code, approval, router_notes. "
+        "tier is either baseline or consultant. "
+        "target_model MUST be the full OpenRouter model id (e.g. "
+        f"{baseline_example!r} or \"anthropic/claude-sonnet-4\"), never the "
+        "words baseline, consultant, default, or primary — those are not valid model ids. "
+        "Use tier=baseline with the baseline model id for routine work; use tier=consultant "
+        "only when a stronger model is needed."
     )
     messages = [
         {"role": "system", "content": prompt},
@@ -154,14 +190,18 @@ def resolve_route(
             router_model,
             float(config.get("router_timeout_seconds") or 45),
         )
-        decision = parse_router_response(
-            raw,
-            consultant_allowlist=list(config.get("consultant_models_allowlist") or []),
-        )
+        allow = list(config.get("consultant_models_allowlist") or [])
+        decision = parse_router_response(raw, consultant_allowlist=allow)
         object.__setattr__(decision, "router_model", router_model)
         object.__setattr__(decision, "latency_ms", int((time.perf_counter() - started) * 1000))
-        if decision.tier == "baseline" and not decision.target_model:
-            object.__setattr__(decision, "target_model", baseline)
+        coerced = _coerce_router_target_to_slug(
+            tier=decision.tier,
+            target_model=decision.target_model,
+            baseline=baseline,
+            current_model=current_model,
+            consultant_allowlist=allow,
+        )
+        object.__setattr__(decision, "target_model", coerced)
         return decision
     except Exception as exc:
         return RoutingDecision(

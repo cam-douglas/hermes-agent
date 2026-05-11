@@ -35,6 +35,29 @@ def test_router_response_requires_json_only_allowlisted_consultant():
         parse_router_response(raw, consultant_allowlist=["openai/gpt-5.4-mini"])
 
 
+def test_router_literal_baseline_replaced_with_config_slug():
+    cfg = {
+        "enabled": True,
+        "provider": "openrouter",
+        "baseline_model": "openai/gpt-5.4-mini",
+        "router_model": "openai/gpt-5.5",
+        "consultant_models_allowlist": [],
+    }
+    raw = json.dumps({
+        "tier": "baseline",
+        "target_model": "baseline",
+        "reason_code": "routine",
+        "approval": None,
+    })
+    decision = resolve_route(
+        cfg,
+        current_model="anthropic/claude-sonnet-4",
+        user_message="hello",
+        call_router=lambda *_args: raw,
+    )
+    assert decision.target_model == "openai/gpt-5.4-mini"
+
+
 def test_adaptive_router_falls_back_to_baseline_on_invalid_output():
     cfg = {
         "enabled": True,
