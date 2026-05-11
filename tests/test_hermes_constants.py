@@ -10,9 +10,63 @@ import hermes_constants
 from hermes_constants import (
     VALID_REASONING_EFFORTS,
     get_default_hermes_root,
+    get_hermes_home,
     is_container,
+    is_hermes_home_dir_usable,
     parse_reasoning_effort,
 )
+
+
+class TestIsHermesHomeDirUsable:
+    def test_missing_path_parent_writable(self, tmp_path):
+        target = tmp_path / "new_hermes"
+        assert not target.exists()
+        assert is_hermes_home_dir_usable(target) is True
+
+    def test_missing_path_parent_not_writable(self, tmp_path):
+        target = tmp_path / "nested" / "new_hermes"
+        (tmp_path / "nested").mkdir()
+        os.chmod(tmp_path / "nested", 0o555)
+        try:
+            assert is_hermes_home_dir_usable(target) is False
+        finally:
+            os.chmod(tmp_path / "nested", 0o755)
+
+    def test_existing_dir_unreadable_config(self, tmp_path):
+        home = tmp_path / "badcfg"
+        home.mkdir()
+        cfg = home / "config.yaml"
+        cfg.write_text("{}")
+        os.chmod(cfg, 0o000)
+        try:
+            assert is_hermes_home_dir_usable(home) is False
+        finally:
+            os.chmod(cfg, 0o600)
+
+    def test_existing_dir_readable(self, tmp_path):
+        home = tmp_path / "ok"
+        home.mkdir()
+        assert is_hermes_home_dir_usable(home) is True
+
+
+class TestGetHermesHomeUnusableEnv:
+    def test_ignores_unusable_hermes_home(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(hermes_constants, "_unusable_hermes_home_warned", False)
+        monkeypatch.setattr(hermes_constants, "_profile_fallback_warned", True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        cfg = foreign / "config.yaml"
+        cfg.write_text("model: {default: x}")
+        os.chmod(cfg, 0o000)
+        monkeypatch.setenv("HERMES_HOME", str(foreign))
+        try:
+            assert get_hermes_home() == tmp_path / ".hermes"
+        finally:
+            os.chmod(cfg, 0o600)
+        err = capsys.readouterr().err
+        assert "not usable" in err
+        assert str(foreign) in err
 
 
 class TestGetDefaultHermesRoot:

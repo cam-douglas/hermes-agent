@@ -7,8 +7,34 @@ without risk of circular imports.
 import os
 from pathlib import Path
 
-
 _profile_fallback_warned: bool = False
+_unusable_hermes_home_warned: bool = False
+
+
+def is_hermes_home_dir_usable(path: str | Path) -> bool:
+    """Return True if *path* is safe to use as HERMES_HOME for this UID.
+
+    - Existing directory: requires read+execute on the dir; if ``config.yaml``
+      exists, it must be readable (avoids ``PermissionError`` loops in
+      config loaders when ``HERMES_HOME`` points at another user's tree).
+    - Missing path: requires parent to exist and be writable+searchable so
+      bootstrap can ``mkdir`` (Docker / first-run layouts).
+    """
+    try:
+        p = Path(path).expanduser()
+        if p.is_dir():
+            if not os.access(p, os.R_OK | os.X_OK):
+                return False
+            cfg = p / "config.yaml"
+            if cfg.is_file() and not os.access(cfg, os.R_OK):
+                return False
+            return True
+        parent = p.parent
+        if parent.is_dir() and os.access(parent, os.W_OK | os.X_OK):
+            return True
+        return False
+    except OSError:
+        return False
 
 
 def get_hermes_home() -> Path:
@@ -16,6 +42,11 @@ def get_hermes_home() -> Path:
 
     Reads HERMES_HOME env var, falls back to ~/.hermes.
     This is the single source of truth — all other copies should import this.
+
+    When ``HERMES_HOME`` is set but not usable (missing parents, permission
+    denied, or unreadable ``config.yaml``), it is ignored with a one-shot
+    stderr warning and the same fallback as when unset — see
+    :func:`is_hermes_home_dir_usable`.
 
     When ``HERMES_HOME`` is unset but an ``active_profile`` file indicates
     a non-default profile is active, logs a loud one-shot warning to
@@ -29,7 +60,26 @@ def get_hermes_home() -> Path:
     """
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
-        return Path(val)
+        candidate = Path(val).expanduser()
+        if is_hermes_home_dir_usable(candidate):
+            return candidate
+        global _unusable_hermes_home_warned
+        if not _unusable_hermes_home_warned:
+            _unusable_hermes_home_warned = True
+            import sys
+
+            try:
+                sys.stderr.write(
+                    "Warning: HERMES_HOME ("
+                    + val
+                    + ") is not usable by this process (missing path, permission "
+                    "denied, or unreadable config.yaml). Ignoring; using "
+                    + str(Path.home() / ".hermes")
+                    + " instead. Unset HERMES_HOME or fix permissions.\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
 
     # Guard: if a non-default profile is sticky-active, warn once that
     # the fallback to the default profile is almost certainly wrong.

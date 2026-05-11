@@ -144,11 +144,26 @@ def _apply_profile_override() -> None:
             profile_name = None
             consume = 0
 
-    # 1.5 If HERMES_HOME is already set and no explicit flag was given, trust it.
-    # This lets child processes (relaunch, subprocess) inherit the parent's
-    # profile choice without having to pass --profile again.
+    # 1.5 If HERMES_HOME is already set and no explicit flag was given, trust it
+    # only when this user can actually use that path.  Stale exports pointing at
+    # another user's ~/.hermes (common after sudo -u, systemd, or shared shells)
+    # would otherwise skip active_profile resolution and spam PermissionError on
+    # config.yaml.
     if profile_name is None and os.environ.get("HERMES_HOME"):
-        return
+        from hermes_constants import is_hermes_home_dir_usable
+
+        raw = os.environ["HERMES_HOME"].strip()
+        if raw and is_hermes_home_dir_usable(raw):
+            return
+        if raw:
+            print(
+                f"Warning: HERMES_HOME ({raw}) is not usable by this user; "
+                f"clearing it for this process so profile resolution uses your "
+                f"own ~/.hermes tree. Unset HERMES_HOME in the shell or fix "
+                f"permissions if you need that path.",
+                file=sys.stderr,
+            )
+        os.environ.pop("HERMES_HOME", None)
 
     # 2. If no flag, check active_profile in the hermes root
     if profile_name is None:
