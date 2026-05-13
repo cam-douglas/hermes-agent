@@ -164,7 +164,12 @@ MEMORY_GUIDANCE = (
     "'Project uses pytest with xdist' ✓ — 'Run tests with pytest -n 4' ✗. "
     "Imperative phrasing gets re-read as a directive in later sessions and can "
     "cause repeated work or override the user's current request. Procedures and "
-    "workflows belong in skills, not memory."
+    "workflows belong in skills, not memory.\n"
+    "Stay on the user's **current** request: do not memorialize bulk text that merely "
+    "appears in a long context (compression summaries, unrelated prior turns, prefetch "
+    "injected context, or recovery after a connection error) unless the user explicitly "
+    "asked to remember it. If memory replace/remove fails, fix arguments once — do not "
+    "loop on memory writes; continue the task without further memory mutations."
 )
 
 SESSION_SEARCH_GUIDANCE = (

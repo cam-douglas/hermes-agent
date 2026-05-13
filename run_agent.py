@@ -1044,6 +1044,9 @@ class AIAgent:
         "have been dropped to keep the conversation alive. See issue #15236.]"
     )
 
+    # Stop memory-family tool retry spirals (bad replace/remove args, provider flakes).
+    _MEMORY_TOOL_ERROR_BREAKER_THRESHOLD = 4
+
     @property
     def base_url(self) -> str:
         return self._base_url
@@ -1912,6 +1915,8 @@ class AIAgent:
         self._memory_nudge_interval = 10
         self._turns_since_memory = 0
         self._iters_since_skill = 0
+        self._memory_tool_consecutive_errors = 0
+        self._memory_tool_breaker_lock = threading.Lock()
         if not skip_memory:
             try:
                 mem_config = _agent_cfg.get("memory", {})
@@ -10098,6 +10103,9 @@ class AIAgent:
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
+        if self._memory_breaker_open() and self._is_memory_family_tool_name(function_name):
+            return self._memory_breaker_synthetic_error()
+
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
             return _todo_tool(
@@ -10186,6 +10194,57 @@ class AIAgent:
         body = ("\n" + indent).join(out_lines)
         return f"{indent}{label}{body}"
 
+
+    def _is_memory_family_tool_name(self, name: str) -> bool:
+        if name == "memory":
+            return True
+        mm = getattr(self, "_memory_manager", None)
+        if mm is not None:
+            try:
+                return bool(mm.has_tool(name))
+            except Exception:
+                return False
+        return False
+
+    def _memory_breaker_open(self) -> bool:
+        with self._memory_tool_breaker_lock:
+            return (
+                self._memory_tool_consecutive_errors
+                >= self._MEMORY_TOOL_ERROR_BREAKER_THRESHOLD
+            )
+
+    def _note_memory_tool_result(
+        self, function_name: str, failed: bool, result: object = None
+    ) -> None:
+        """Track consecutive memory-family failures to open the circuit breaker."""
+        if not self._is_memory_family_tool_name(function_name):
+            return
+        if failed and result is not None:
+            try:
+                rtxt = result if isinstance(result, str) else _multimodal_text_summary(result)
+                if "hermes_memory_breaker" in rtxt:
+                    return
+            except Exception:
+                pass
+        with self._memory_tool_breaker_lock:
+            if failed:
+                self._memory_tool_consecutive_errors += 1
+            else:
+                self._memory_tool_consecutive_errors = 0
+
+    def _memory_breaker_synthetic_error(self) -> str:
+        return json.dumps(
+            {
+                "error": (
+                    "Memory tools are paused for this turn after repeated failures "
+                    "(invalid replace/remove arguments, provider errors, etc.). "
+                    "Stop retrying memory for this turn: continue the user's task "
+                    "without writes, or use action=add only with explicit user consent."
+                ),
+                "hermes_memory_breaker": True,
+            },
+            ensure_ascii=False,
+        )
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
 
@@ -10497,6 +10556,9 @@ class AIAgent:
                     result_preview = _err_text[:200] if len(_err_text) > 200 else _err_text
                     logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
+                if not blocked:
+                    self._note_memory_tool_result(function_name, is_error, function_result)
+
                 if not blocked and self.tool_progress_callback:
                     try:
                         self.tool_progress_callback(
@@ -10718,6 +10780,9 @@ class AIAgent:
                 # tool result for the original tool_call_id without executing.
                 function_result = self._guardrail_block_result(_guardrail_block_decision)
                 tool_duration = 0.0
+            elif self._memory_breaker_open() and self._is_memory_family_tool_name(function_name):
+                function_result = self._memory_breaker_synthetic_error()
+                tool_duration = 0.0
             elif function_name == "todo":
                 from tools.todo_tool import todo_tool as _todo_tool
                 function_result = _todo_tool(
@@ -10921,6 +10986,11 @@ class AIAgent:
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
             else:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, _result_len)
+
+            if not _execution_blocked:
+                self._note_memory_tool_result(
+                    function_name, _is_error_result, function_result,
+                )
 
             if not _execution_blocked and self.tool_progress_callback:
                 try:
@@ -11564,6 +11634,7 @@ class AIAgent:
         
         # Track user turns for memory flush and periodic nudge logic
         self._user_turn_count += 1
+        self._memory_tool_consecutive_errors = 0
 
         # Reset the streaming context scrubber at the top of each turn so a
         # hung span from a prior interrupted stream can't taint this turn's
