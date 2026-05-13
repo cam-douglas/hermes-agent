@@ -238,6 +238,42 @@ def _build_skill_message(
     return "\n".join(parts)
 
 
+def _is_paperclip_slash_family(cmd_name: str) -> bool:
+    """Whether this slug belongs to the Paperclip multi-skill bundle."""
+    return cmd_name == "paperclip" or cmd_name.startswith("paperclip-")
+
+
+def _register_unified_paperclip_slash(
+    candidates: list[tuple[str, Dict[str, Any]]],
+) -> None:
+    """Register exactly one ``/paperclip`` for the Paperclip bundle.
+
+    Many installs ship several skills (``paperclip-dev``, ``paperclip-distill``,
+    …) that each claim a ``paperclip-*`` slash.  Menus then show duplicates and
+    noisy variants.  We keep a single ``/paperclip`` that prefers the umbrella
+    skill (name and directory ``paperclip``) and otherwise picks a stable
+    fallback so operators still have one entrypoint.
+    """
+    global _skill_commands
+    if not candidates:
+        return
+    exact_slug = [e for cmd, e in candidates if cmd == "paperclip"]
+    pool: list[Dict[str, Any]] = exact_slug if exact_slug else [e for _, e in candidates]
+
+    def _score(entry: Dict[str, Any]) -> tuple:
+        path = Path(entry["skill_md_path"])
+        parent = path.parent.name.lower()
+        sname = (entry.get("name") or "").strip().lower()
+        return (
+            0 if sname == "paperclip" else 1,
+            0 if parent == "paperclip" else 1,
+            len(path.parts),
+            str(path),
+        )
+
+    _skill_commands["/paperclip"] = min(pool, key=_score)
+
+
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     """Scan ~/.hermes/skills/ and return a mapping of /command -> skill info.
 
@@ -258,6 +294,8 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         if SKILLS_DIR.exists():
             dirs_to_scan.append(SKILLS_DIR)
         dirs_to_scan.extend(get_external_skills_dirs())
+
+        paperclip_slash_candidates: list[tuple[str, Dict[str, Any]]] = []
 
         for scan_dir in dirs_to_scan:
             for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
@@ -291,14 +329,39 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     cmd_name = _SKILL_MULTI_HYPHEN.sub('-', cmd_name).strip('-')
                     if not cmd_name:
                         continue
-                    _skill_commands[f"/{cmd_name}"] = {
+                    entry = {
                         "name": name,
                         "description": description or f"Invoke the {name} skill",
                         "skill_md_path": str(skill_md),
                         "skill_dir": str(skill_md.parent),
                     }
+                    if _is_paperclip_slash_family(cmd_name):
+                        paperclip_slash_candidates.append((cmd_name, entry))
+                        continue
+                    _skill_commands[f"/{cmd_name}"] = entry
+                    # Optional extra slash keys (e.g. backward-compat short names).
+                    meta = frontmatter.get("metadata")
+                    if isinstance(meta, dict):
+                        hermes_meta = meta.get("hermes")
+                        if isinstance(hermes_meta, dict):
+                            raw_aliases = hermes_meta.get("slash_aliases") or []
+                            if isinstance(raw_aliases, str):
+                                raw_aliases = [raw_aliases]
+                            if isinstance(raw_aliases, list):
+                                for raw_al in raw_aliases:
+                                    if not isinstance(raw_al, str):
+                                        continue
+                                    al = raw_al.strip().lower().replace(" ", "-").replace("_", "-")
+                                    al = _SKILL_INVALID_CHARS.sub("", al)
+                                    al = _SKILL_MULTI_HYPHEN.sub("-", al).strip("-")
+                                    if not al or al == cmd_name:
+                                        continue
+                                    key = f"/{al}"
+                                    if key not in _skill_commands:
+                                        _skill_commands[key] = entry
                 except Exception:
                     continue
+        _register_unified_paperclip_slash(paperclip_slash_candidates)
     except Exception:
         pass
     return _skill_commands

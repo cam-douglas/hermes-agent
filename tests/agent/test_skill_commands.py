@@ -56,6 +56,23 @@ class TestScanSkillCommands:
         assert "/my-skill" in result
         assert result["/my-skill"]["name"] == "my-skill"
 
+    def test_metadata_slash_aliases(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "primary-name",
+                frontmatter_extra=(
+                    "metadata:\n"
+                    "  hermes:\n"
+                    "    slash_aliases: [legacy-slug, alt-slug]\n"
+                ),
+            )
+            result = scan_skill_commands()
+        assert "/primary-name" in result
+        assert "/legacy-slug" in result
+        assert "/alt-slug" in result
+        assert result["/alt-slug"] is result["/primary-name"]
+
     def test_empty_dir(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             result = scan_skill_commands()
@@ -352,6 +369,29 @@ class TestScanSkillCommands:
         assert any("/" in k[1:] for k in result) is False  # no unescaped /
 
 
+class TestPaperclipSlashCollapse:
+    """Paperclip ships multiple skills; only ``/paperclip`` should register."""
+
+    def test_paperclip_bundle_collapses_to_single_slash(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "paperclip-dev", body="Dev skill.")
+            _make_skill(tmp_path, "paperclip-distill", body="Distill skill.")
+            umbrella = _make_skill(tmp_path, "paperclip", body="Umbrella.")
+            result = scan_skill_commands()
+        assert set(result.keys()) == {"/paperclip"}
+        assert result["/paperclip"]["skill_dir"] == str(umbrella)
+
+    def test_paperclip_fallback_without_exact_slug_still_one_command(
+        self, tmp_path,
+    ):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "paperclip-dev", body="A.")
+            _make_skill(tmp_path, "paperclip-zed", body="B.")
+            result = scan_skill_commands()
+        assert set(result.keys()) == {"/paperclip"}
+        assert result["/paperclip"]["name"] in ("paperclip-dev", "paperclip-zed")
+
+
 class TestResolveSkillCommandKey:
     """Telegram bot-command names disallow hyphens, so the menu registers
     skills with hyphens swapped for underscores. When Telegram autocomplete
@@ -459,6 +499,21 @@ Generate some audio.
         assert msg is not None
         assert "test-skill" in msg
         assert "do stuff" in msg
+
+    def test_autoresearch_critical_preamble_primary_slash_only(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "autoresearch", body="Autoresearch body")
+            result = scan_skill_commands()
+            msg = build_skill_invocation_message("/autoresearch")
+        assert "/autoresearch" in result
+        assert "/arcpu" not in result
+        assert "/repo-autoresearch-cpu" not in result
+        assert msg is not None
+        assert "CRITICAL — /autoresearch" in msg
+        assert "program.md" in msg
+        assert "skills-repos" in msg  # explicit “do not use skills-repos” guidance
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            assert build_skill_invocation_message("/arcpu") is None
 
     def test_returns_none_for_unknown(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
