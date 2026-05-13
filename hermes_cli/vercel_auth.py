@@ -56,7 +56,8 @@ def describe_vercel_auth() -> VercelAuthStatus:
                 "mode: incomplete access token",
                 f"present env: {', '.join(present_token_vars)}",
                 f"missing env: {', '.join(missing_token_vars)}",
-                "recommended: set VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID together",
+                "recommended: set VERCEL_TOKEN and VERCEL_TEAM_ID with VERCEL_PROJECT_ID, "
+                "or run `vercel link` / set VERCEL_DEFAULT_PROJECT_ID / VERCEL_LINK_SEARCH_PATHS",
             ),
         )
 
@@ -64,7 +65,8 @@ def describe_vercel_auth() -> VercelAuthStatus:
         False,
         "not configured",
         (
-            "recommended: set VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID",
+            "recommended: set VERCEL_TOKEN and VERCEL_TEAM_ID plus VERCEL_PROJECT_ID "
+            "(from `vercel link`, VERCEL_DEFAULT_PROJECT_ID, or VERCEL_LINK_SEARCH_PATHS)",
             "development-only alternative: set VERCEL_OIDC_TOKEN",
         ),
     )

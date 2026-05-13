@@ -248,6 +248,10 @@ class VercelSandboxEnvironment(BaseEnvironment):
         self._sync_manager: FileSyncManager | None = None
         self._create_params = self._build_create_params(cpu=cpu, memory=memory, disk=disk)
 
+        from tools.vercel_env import ensure_vercel_project_id_for_sandbox
+
+        ensure_vercel_project_id_for_sandbox()
+
         self._sandbox = self._create_sandbox()
         self._configure_attached_sandbox(requested_cwd=requested_cwd)
         self._sync_manager.sync(force=True)

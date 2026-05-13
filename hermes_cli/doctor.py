@@ -1036,16 +1036,23 @@ def run_doctor(args):
             check_fail("vercel SDK not installed", "(pip install 'hermes-agent[vercel]')")
             issues.append("Install the Vercel optional dependency: pip install 'hermes-agent[vercel]'")
 
+        from tools.vercel_env import ensure_vercel_project_id_for_sandbox
+
+        ensure_vercel_project_id_for_sandbox()
         auth_status = describe_vercel_auth()
         if auth_status.ok:
             check_ok("Vercel auth", f"({auth_status.label})")
         elif auth_status.label.startswith("partial"):
             check_fail("Vercel auth incomplete", f"({auth_status.label})")
-            issues.append("Set VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID together")
+            issues.append(
+                "Set VERCEL_TOKEN and VERCEL_TEAM_ID with VERCEL_PROJECT_ID "
+                "(or vercel link / VERCEL_DEFAULT_PROJECT_ID)"
+            )
         else:
             check_fail("Vercel auth not configured", f"({auth_status.label})")
             issues.append(
-                "Configure Vercel Sandbox auth with VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID"
+                "Configure Vercel Sandbox auth with VERCEL_TOKEN and VERCEL_TEAM_ID plus "
+                "VERCEL_PROJECT_ID (or vercel link / VERCEL_DEFAULT_PROJECT_ID)"
             )
         for line in auth_status.detail_lines:
             check_info(f"Vercel auth {line}")

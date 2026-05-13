@@ -715,7 +715,9 @@ def _prompt_vercel_sandbox_settings(config: dict):
 
     print()
     print_info("Vercel authentication:")
-    print_info("  Use a long-lived Vercel access token plus project/team IDs.")
+    print_info("  Use a long-lived **account** Vercel token (not a vck_ project key)")
+    print_info("  plus team id. Project id can come from `vercel link` or ")
+    print_info("  VERCEL_DEFAULT_PROJECT_ID if you omit VERCEL_PROJECT_ID.")
     linked_project = _read_nearest_vercel_project()
     if linked_project:
         print_info("  Found defaults in nearest .vercel/project.json.")
@@ -740,29 +742,9 @@ def _prompt_vercel_sandbox_settings(config: dict):
 
 def _read_nearest_vercel_project(start: Path | None = None) -> dict[str, str]:
     """Read project/team defaults from the nearest Vercel link file."""
-    current = (start or Path.cwd()).resolve()
-    if current.is_file():
-        current = current.parent
+    from tools.vercel_env import read_nearest_vercel_project_json
 
-    for directory in (current, *current.parents):
-        project_file = directory / ".vercel" / "project.json"
-        if not project_file.exists():
-            continue
-        try:
-            data = json.loads(project_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        return {
-            key: value
-            for key, value in {
-                "projectId": data.get("projectId"),
-                "orgId": data.get("orgId"),
-            }.items()
-            if isinstance(value, str) and value.strip()
-        }
-    return {}
+    return read_nearest_vercel_project_json(start)
 
 
 # Tool categories and provider config are now in tools_config.py (shared

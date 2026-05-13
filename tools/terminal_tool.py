@@ -127,6 +127,10 @@ def _is_supported_vercel_runtime(runtime: str) -> bool:
 
 def _check_vercel_sandbox_requirements(config: dict[str, Any]) -> bool:
     """Validate Vercel Sandbox terminal backend requirements."""
+    from tools.vercel_env import ensure_vercel_project_id_for_sandbox
+
+    ensure_vercel_project_id_for_sandbox()
+
     runtime = (config.get("vercel_runtime") or "").strip()
     if not _is_supported_vercel_runtime(runtime):
         supported = ", ".join(_SUPPORTED_VERCEL_RUNTIMES)
@@ -167,16 +171,18 @@ def _check_vercel_sandbox_requirements(config: dict[str, Any]) -> bool:
         logger.error(
             "Vercel Sandbox backend selected with token auth, but "
             "VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID must all "
-            "be set together. VERCEL_OIDC_TOKEN is supported for one-off "
-            "local development only."
+            "be set together (see `vercel link`, VERCEL_LINK_SEARCH_PATHS, or "
+            "VERCEL_DEFAULT_PROJECT_ID). VERCEL_OIDC_TOKEN is supported for "
+            "one-off local development only."
         )
         return False
 
     logger.error(
         "Vercel Sandbox backend selected but no supported auth configuration "
         "was found. Set VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID "
-        "for normal use. VERCEL_OIDC_TOKEN is supported for one-off local "
-        "development only."
+        "for normal use (project id can come from `vercel link` / "
+        "VERCEL_DEFAULT_PROJECT_ID). VERCEL_OIDC_TOKEN is supported for "
+        "one-off local development only."
     )
     return False
 

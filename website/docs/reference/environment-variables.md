@@ -147,9 +147,11 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `TINKER_API_KEY` | RL training ([tinker-console.thinkingmachines.ai](https://tinker-console.thinkingmachines.ai/)) |
 | `WANDB_API_KEY` | RL training metrics ([wandb.ai](https://wandb.ai/)) |
 | `DAYTONA_API_KEY` | Daytona cloud sandboxes ([daytona.io](https://daytona.io/)) |
-| `VERCEL_TOKEN` | Vercel Sandbox access token ([vercel.com](https://vercel.com/)) |
-| `VERCEL_PROJECT_ID` | Vercel project ID (required with `VERCEL_TOKEN`) |
-| `VERCEL_TEAM_ID` | Vercel team ID (required with `VERCEL_TOKEN`) |
+| `VERCEL_TOKEN` | Vercel **account** access token from [Account Settings → Tokens](https://vercel.com/account/tokens) (not a `vck_` project key). Required for Sandbox unless using OIDC. |
+| `VERCEL_PROJECT_ID` | Vercel project UUID for **Sandbox** scope. Optional in Hermes if inferred from `vercel link` (`.vercel/project.json`), `VERCEL_LINK_SEARCH_PATHS`, or `VERCEL_DEFAULT_PROJECT_ID`. |
+| `VERCEL_DEFAULT_PROJECT_ID` | When set, used as `VERCEL_PROJECT_ID` if unset and no link file matches — use a dedicated “sandbox host” project. |
+| `VERCEL_LINK_SEARCH_PATHS` | OS-specific path list (`:` or `;`) of directories; Hermes walks each upward looking for `.vercel/project.json`. |
+| `VERCEL_TEAM_ID` | Vercel team / org ID (required with `VERCEL_TOKEN` for Sandbox). |
 | `VERCEL_OIDC_TOKEN` | Vercel short-lived OIDC token (development-only alternative) |
 
 ### Langfuse Observability

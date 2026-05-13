@@ -1,5 +1,6 @@
 import importlib
 import logging
+import os
 
 import pytest
 
@@ -28,6 +29,8 @@ def _clear_terminal_env(monkeypatch):
         "VERCEL_TOKEN",
         "VERCEL_PROJECT_ID",
         "VERCEL_TEAM_ID",
+        "VERCEL_DEFAULT_PROJECT_ID",
+        "VERCEL_LINK_SEARCH_PATHS",
         "HOME",
         "USERPROFILE",
     ]
@@ -241,6 +244,40 @@ def test_vercel_backend_accepts_token_tuple_auth(monkeypatch):
     monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
 
     assert terminal_tool_module.check_terminal_requirements() is True
+
+
+def test_vercel_backend_resolves_project_from_vercel_link(monkeypatch, tmp_path):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
+    monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "node22")
+    monkeypatch.setenv("VERCEL_TOKEN", "token")
+    monkeypatch.setenv("VERCEL_TEAM_ID", "team")
+    monkeypatch.delenv("VERCEL_PROJECT_ID", raising=False)
+    vercel = tmp_path / ".vercel"
+    vercel.mkdir()
+    (vercel / "project.json").write_text(
+        '{"projectId":"prj_linked","orgId":"team_linked"}', encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+
+    assert terminal_tool_module.check_terminal_requirements() is True
+    assert os.environ.get("VERCEL_PROJECT_ID") == "prj_linked"
+
+
+def test_vercel_backend_resolves_project_from_default_id(monkeypatch, tmp_path):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
+    monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "node22")
+    monkeypatch.setenv("VERCEL_TOKEN", "token")
+    monkeypatch.setenv("VERCEL_TEAM_ID", "team")
+    monkeypatch.setenv("VERCEL_DEFAULT_PROJECT_ID", "prj_default")
+    monkeypatch.delenv("VERCEL_PROJECT_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+
+    assert terminal_tool_module.check_terminal_requirements() is True
+    assert os.environ.get("VERCEL_PROJECT_ID") == "prj_default"
 
 
 @pytest.mark.parametrize("runtime", ["node24", "node22", "python3.13"])
