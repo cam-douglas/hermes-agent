@@ -8,10 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
-from gateway.config import HomeChannel, Platform
+from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import (
+    RestartTestAdapter,
     make_restart_runner,
     make_restart_source,
 )
@@ -623,3 +624,86 @@ async def test_shutdown_notifications_use_cached_live_thread_source_when_origin_
         "⚠️ Gateway shutting down — Your current task will be interrupted.",
         metadata={"thread_id": "topic-7"},
     )
+
+
+@pytest.mark.asyncio
+async def test_startup_home_notifications_only_operator_platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner.config = GatewayConfig(
+        gateway_operator_notify_platform="whatsapp",
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                enabled=True,
+                token="***",
+                home_channel=HomeChannel(
+                    platform=Platform.TELEGRAM, chat_id="tg-home", name="T"
+                ),
+            ),
+            Platform.WHATSAPP: PlatformConfig(
+                enabled=True,
+                home_channel=HomeChannel(
+                    platform=Platform.WHATSAPP, chat_id="wa-home", name="W"
+                ),
+            ),
+        },
+    )
+    tg_ad = RestartTestAdapter()
+    wa_ad = RestartTestAdapter()
+    wa_ad.platform = Platform.WHATSAPP
+    tg_ad.send = AsyncMock(return_value=SendResult(success=True, message_id="1"))
+    wa_ad.send = AsyncMock(return_value=SendResult(success=True, message_id="2"))
+    runner.adapters = {Platform.TELEGRAM: tg_ad, Platform.WHATSAPP: wa_ad}
+    runner._send_home_channel_startup_notifications = (
+        gateway_run.GatewayRunner._send_home_channel_startup_notifications.__get__(
+            runner, gateway_run.GatewayRunner
+        )
+    )
+
+    delivered = await runner._send_home_channel_startup_notifications()
+
+    assert delivered == {("whatsapp", "wa-home", None)}
+    tg_ad.send.assert_not_called()
+    wa_ad.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_restart_notification_redirects_to_operator_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    notify_path = tmp_path / ".restart_notify.json"
+    notify_path.write_text(
+        json.dumps({"platform": "telegram", "chat_id": "42"}),
+    )
+
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner.config = GatewayConfig(
+        gateway_operator_notify_platform="whatsapp",
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(enabled=True, token="***"),
+            Platform.WHATSAPP: PlatformConfig(
+                enabled=True,
+                home_channel=HomeChannel(
+                    platform=Platform.WHATSAPP, chat_id="wa-home", name="W"
+                ),
+            ),
+        },
+    )
+    tg_ad = RestartTestAdapter()
+    wa_ad = RestartTestAdapter()
+    wa_ad.platform = Platform.WHATSAPP
+    tg_ad.send = AsyncMock()
+    wa_ad.send = AsyncMock(return_value=SendResult(success=True, message_id="x"))
+    runner.adapters = {Platform.TELEGRAM: tg_ad, Platform.WHATSAPP: wa_ad}
+    runner._send_restart_notification = (
+        gateway_run.GatewayRunner._send_restart_notification.__get__(
+            runner, gateway_run.GatewayRunner
+        )
+    )
+
+    target = await runner._send_restart_notification()
+
+    assert target == ("whatsapp", "wa-home", None)
+    tg_ad.send.assert_not_called()
+    wa_ad.send.assert_awaited_once()
+    assert not notify_path.exists()

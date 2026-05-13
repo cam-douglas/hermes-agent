@@ -2707,7 +2707,10 @@ class GatewayRunner:
         # elsewhere), which would otherwise trigger
         # ``RuntimeError: dictionary changed size during iteration`` —
         # observed in a user report during gateway shutdown.
+        op = self.config.resolved_gateway_operator_notify_platform()
         for platform, adapter in list(self.adapters.items()):
+            if op is not None and platform != op:
+                continue
             home = self.config.get_home_channel(platform)
             if not home or not home.chat_id:
                 continue
@@ -7025,6 +7028,7 @@ class GatewayRunner:
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
+                    session_id=agent_result.get("session_id"),
                 )
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
@@ -11960,6 +11964,54 @@ class GatewayRunner:
 
         return True
 
+    def _resolve_operator_status_delivery(
+        self,
+        *,
+        source: SessionSource,
+        progress_thread_id: Optional[str],
+        event_message_id: Optional[str],
+    ) -> tuple[Optional[Any], Optional[str], Optional[Dict[str, Any]]]:
+        """Adapter/chat/metadata for mid-turn *operational* pings (not main replies).
+
+        When ``gateway_operator_notify_platform`` is set, route "Still working",
+        context-pressure status callbacks, and inactivity warnings to that
+        platform's home channel so other connected platforms stay quiet.
+        """
+        op = self.config.resolved_gateway_operator_notify_platform()
+        if op is not None:
+            adapter = self.adapters.get(op)
+            home = self.config.get_home_channel(op)
+            if adapter and home and home.chat_id:
+                chat_id = str(home.chat_id)
+                if op == Platform.FEISHU and home.thread_id and event_message_id:
+                    meta: Optional[Dict[str, Any]] = {
+                        "thread_id": home.thread_id,
+                        "reply_to_message_id": event_message_id,
+                    }
+                elif home.thread_id:
+                    meta = {"thread_id": home.thread_id}
+                else:
+                    meta = None
+                return adapter, chat_id, meta
+            logger.debug(
+                "gateway_operator_notify_platform=%s missing adapter/home — "
+                "falling back to conversation source for operational pings",
+                op.value,
+            )
+
+        adapter = self.adapters.get(source.platform)
+        if not adapter or not source.chat_id:
+            return None, None, None
+        chat_id = str(source.chat_id)
+        if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
+            meta = {
+                "thread_id": progress_thread_id,
+                "reply_to_message_id": event_message_id,
+            }
+        else:
+            meta = {"thread_id": progress_thread_id} if progress_thread_id else None
+        return adapter, chat_id, meta
+
     async def _send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
         """Notify the chat that initiated /restart that the gateway is back."""
         notify_path = _hermes_home / ".restart_notify.json"
@@ -11968,14 +12020,30 @@ class GatewayRunner:
 
         try:
             data = json.loads(notify_path.read_text())
-            platform_str = data.get("platform")
-            chat_id = data.get("chat_id")
-            thread_id = data.get("thread_id")
+            op = self.config.resolved_gateway_operator_notify_platform()
+            if op is not None:
+                platform = op
+                platform_str = platform.value
+                home = self.config.get_home_channel(op)
+                if not home or not home.chat_id:
+                    logger.warning(
+                        "Restart notification skipped: gateway_operator_notify_platform=%s "
+                        "has no home_channel configured",
+                        platform_str,
+                    )
+                    return None
+                chat_id = str(home.chat_id)
+                thread_id = home.thread_id
+            else:
+                platform_str = data.get("platform")
+                chat_id = data.get("chat_id")
+                thread_id = data.get("thread_id")
 
-            if not platform_str or not chat_id:
-                return None
+                if not platform_str or not chat_id:
+                    return None
 
-            platform = Platform(platform_str)
+                platform = Platform(platform_str)
+
             adapter = self.adapters.get(platform)
             if not adapter:
                 logger.debug(
@@ -12038,7 +12106,10 @@ class GatewayRunner:
         skipped = skip_targets or set()
         message = "♻️ Gateway online — Hermes is back and ready."
 
+        op = self.config.resolved_gateway_operator_notify_platform()
         for platform, adapter in self.adapters.items():
+            if op is not None and platform != op:
+                continue
             home = self.config.get_home_channel(platform)
             if not home or not home.chat_id:
                 continue
@@ -13820,7 +13891,8 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("agent:step hook error: %s", _e)
 
-        # Bridge sync status_callback → async adapter.send for context pressure
+        # Conversation adapter: interim assistant text, memory review, exec
+        # approval, typing — stay on the platform where the user is chatting.
         _status_adapter = self.adapters.get(source.platform)
         _status_chat_id = source.chat_id
         if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
@@ -13835,15 +13907,22 @@ class GatewayRunner:
         else:
             _status_thread_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
 
+        # Context-pressure / heartbeat status — optional ``gateway_operator_notify_platform``.
+        _ping_adapter, _ping_chat_id, _ping_meta = self._resolve_operator_status_delivery(
+            source=source,
+            progress_thread_id=_progress_thread_id,
+            event_message_id=event_message_id,
+        )
+
         def _status_callback_sync(event_type: str, message: str) -> None:
-            if not _status_adapter or not _run_still_current():
+            if not _ping_adapter or not _run_still_current():
                 return
             try:
                 _fut = asyncio.run_coroutine_threadsafe(
-                    _status_adapter.send(
-                        _status_chat_id,
+                    _ping_adapter.send(
+                        _ping_chat_id,
                         message,
-                        metadata=_status_thread_metadata,
+                        metadata=_ping_meta,
                     ),
                     _loop_for_step,
                 )
@@ -14702,8 +14781,7 @@ class GatewayRunner:
         async def _notify_long_running():
             if _NOTIFY_INTERVAL is None:
                 return  # Notifications disabled (gateway_notify_interval: 0)
-            _notify_adapter = self.adapters.get(source.platform)
-            if not _notify_adapter:
+            if not _ping_adapter or not _ping_chat_id:
                 return
             while True:
                 await asyncio.sleep(_NOTIFY_INTERVAL)
@@ -14723,10 +14801,10 @@ class GatewayRunner:
                     except Exception:
                         pass
                 try:
-                    _notify_res = await _notify_adapter.send(
-                        source.chat_id,
+                    _notify_res = await _ping_adapter.send(
+                        _ping_chat_id,
                         f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})",
-                        metadata=_status_thread_metadata,
+                        metadata=_ping_meta,
                     )
                     if (
                         _cleanup_progress
@@ -14815,18 +14893,17 @@ class GatewayRunner:
                     if (not _warning_fired and _agent_warning is not None
                             and _idle_secs >= _agent_warning):
                         _warning_fired = True
-                        _warn_adapter = self.adapters.get(source.platform)
-                        if _warn_adapter:
+                        if _ping_adapter and _ping_chat_id:
                             _elapsed_warn = int(_agent_warning // 60) or 1
                             _remaining_mins = int((_agent_timeout - _agent_warning) // 60) or 1
                             try:
-                                await _warn_adapter.send(
-                                    source.chat_id,
+                                await _ping_adapter.send(
+                                    _ping_chat_id,
                                     f"⚠️ No activity for {_elapsed_warn} min. "
                                     f"If the agent does not respond soon, it will "
                                     f"be timed out in {_remaining_mins} min. "
                                     f"You can continue waiting or use /reset.",
-                                    metadata=_status_thread_metadata,
+                                    metadata=_ping_meta,
                                 )
                             except Exception as _warn_err:
                                 logger.debug("Inactivity warning send error: %s", _warn_err)
