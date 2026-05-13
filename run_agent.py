@@ -1369,7 +1369,11 @@ class AIAgent:
         self._delegate_depth = 0        # 0 = top-level agent, incremented for children
         self._active_children = []      # Running child AIAgents (for interrupt propagation)
         self._active_children_lock = threading.Lock()
-        
+        # Autoresearch ``program.md`` wall-clock stop (monotonic seconds); subagents skip _apply.
+        self._autoresearch_deadline_ts = None  # ``time.time()`` instant when the outer budget expires
+        self._autoresearch_started_ts = None
+        self._autoresearch_budget_minutes = None
+
         # Store OpenRouter provider preferences
         self.providers_allowed = providers_allowed
         self.providers_ignored = providers_ignored
@@ -11209,6 +11213,206 @@ class AIAgent:
 
         return final_response
 
+    def _apply_autoresearch_outer_runtime_budget(self) -> None:
+        """Raise iteration cap and arm wall-clock stop when autoresearch program.md is active."""
+        if getattr(self, "_delegate_depth", 0) > 0:
+            return
+        try:
+            from tools.autoresearch_runtime import (
+                clear_autoresearch_wallclock_state,
+                load_autoresearch_outer_runtime_minutes,
+                persist_autoresearch_wallclock_state,
+            )
+        except Exception as exc:
+            logger.debug("autoresearch_runtime unavailable: %s", exc)
+            return
+
+        loaded = load_autoresearch_outer_runtime_minutes()
+        if loaded is None:
+            self._autoresearch_deadline_ts = None
+            self._autoresearch_started_ts = None
+            self._autoresearch_budget_minutes = None
+            clear_autoresearch_wallclock_state()
+            return
+
+        minutes, provenance = loaded
+        cap = 1_000_000
+        if self.max_iterations < cap:
+            self.max_iterations = cap
+        self.iteration_budget = IterationBudget(self.max_iterations)
+
+        seconds_budget = int(minutes) * 60
+        now_ts = time.time()
+        existing_deadline = getattr(self, "_autoresearch_deadline_ts", None)
+        if existing_deadline is not None and now_ts < existing_deadline:
+            # Same CLI session / agent instance: keep one continuous wall-clock window
+            # across multiple ``run_conversation`` turns until the budget is exhausted.
+            persist_deadline = getattr(self, "_autoresearch_deadline_ts", None)
+            if persist_deadline is not None:
+                persist_autoresearch_wallclock_state(
+                    session_id=self.session_id or "",
+                    deadline_epoch=persist_deadline,
+                    budget_minutes=getattr(
+                        self, "_autoresearch_budget_minutes", int(minutes)
+                    ),
+                    provenance=provenance,
+                )
+            return
+
+        self._autoresearch_deadline_ts = now_ts + float(seconds_budget)
+        self._autoresearch_started_ts = now_ts
+        self._autoresearch_budget_minutes = int(minutes)
+        persist_autoresearch_wallclock_state(
+            session_id=self.session_id or "",
+            deadline_epoch=self._autoresearch_deadline_ts,
+            budget_minutes=int(minutes),
+            provenance=provenance,
+        )
+        logger.info(
+            "Autoresearch outer runtime: %s minutes (source=%s); max_iterations=%s; "
+            "deadline_epoch=%.1f",
+            minutes,
+            provenance,
+            self.max_iterations,
+            self._autoresearch_deadline_ts,
+        )
+        self._emit_status(
+            f"🧪 Autoresearch: outer runtime {minutes} min ({provenance}) — iteration cap raised"
+        )
+        if not self.quiet_mode:
+            self._safe_print(
+                f"\n🧪 Autoresearch mode: wall-clock budget {minutes} min ({provenance}); "
+                "iteration cap raised for long runs.\n"
+            )
+        self._emit_autoresearch_follow_banner(
+            budget_minutes=int(minutes),
+            provenance=provenance,
+        )
+
+    def _log_autoresearch_wallclock_stop(self, detail: str) -> None:
+        """Log elapsed monotonic time vs budget for observability."""
+        started = getattr(self, "_autoresearch_started_ts", None)
+        budget = getattr(self, "_autoresearch_budget_minutes", None)
+        if started is None or budget is None:
+            logger.info("Autoresearch wall-clock stop (%s)", detail)
+            return
+        elapsed_min = (time.time() - started) / 60.0
+        logger.info(
+            "Autoresearch wall-clock stop (%s): elapsed=%.3f min of %s min budget",
+            detail,
+            elapsed_min,
+            budget,
+        )
+
+    def _emit_autoresearch_follow_banner(
+        self, *, budget_minutes: int, provenance: str
+    ) -> None:
+        """Print copy-paste terminal commands (color-highlighted) for live observation."""
+        import os
+        import shlex
+
+        tc: Dict[str, str] = {}
+        try:
+            from tools.autoresearch_runtime import (
+                format_autoresearch_train_commands,
+                resolve_autoresearch_checkout_dir,
+            )
+
+            checkout = resolve_autoresearch_checkout_dir()
+            tc = format_autoresearch_train_commands(
+                checkout_dir=checkout,
+                budget_minutes=budget_minutes,
+            )
+        except Exception as exc:
+            logger.debug("autoresearch train banner: %s", exc)
+
+        sid = (self.session_id or "").strip()
+        sid_q = shlex.quote(sid) if sid else '""'
+        logs_cmd = f"hermes logs -f --session {sid_q}"
+        attach_cmd = f"hermes chat --continue {sid_q}"
+
+        train_info_log = []
+        for key in (
+            "prepare_recommended_cmd",
+            "train_recommended_cmd",
+            "prepare_uv_cmd",
+            "train_uv_cmd",
+        ):
+            if tc.get(key):
+                train_info_log.append(f"{key}={tc[key]!r}")
+
+        logger.info(
+            "Autoresearch observability (session=%s, %s min, %s): %s | %s | %s",
+            sid or "-",
+            budget_minutes,
+            provenance,
+            logs_cmd,
+            attach_cmd,
+            " | ".join(train_info_log) if train_info_log else "(no train cmds)",
+        )
+
+        if os.environ.get("NO_COLOR"):
+            parts = [
+                "\n── Autoresearch — copy/paste into another terminal ──\n",
+                f"  (live logs): {logs_cmd}\n",
+                f"  (attach TUI): {attach_cmd}\n",
+            ]
+            if tc:
+                parts.append("  Training / prepare (exact; default avoids `uv`):\n")
+                if tc.get("prepare_recommended_cmd"):
+                    parts.append(f"    prepare: {tc['prepare_recommended_cmd']}\n")
+                if tc.get("train_recommended_cmd"):
+                    parts.append(f"    train:   {tc['train_recommended_cmd']}\n")
+                if tc.get("prepare_uv_cmd"):
+                    parts.append(f"    (uv) prepare: {tc['prepare_uv_cmd']}\n")
+                if tc.get("train_uv_cmd"):
+                    parts.append(f"    (uv) train:   {tc['train_uv_cmd']}\n")
+            parts.append(
+                f"  Full JSON: $HERMES_HOME/autoresearch_wallclock_state.json\n"
+                f"  Hermes tool loop budget: {budget_minutes} min "
+                f"(train timeout matches this).\n"
+            )
+            self._safe_print("".join(parts))
+            return
+
+        CY = "\033[96m"
+        MG = "\033[95m"
+        GR = "\033[92m"
+        YEL = "\033[93m"
+        DIM = "\033[2m"
+        RST = "\033[0m"
+        BOLD = "\033[1m"
+        parts = [
+            f"\n{DIM}── Autoresearch — copy/paste into another terminal ──{RST}\n",
+            f"{DIM}Live log stream:{RST}\n  {BOLD}{CY}{logs_cmd}{RST}\n",
+            f"{DIM}Resume this session (TUI):{RST}\n  {BOLD}{MG}{attach_cmd}{RST}\n",
+        ]
+        if tc.get("prepare_recommended_cmd"):
+            parts.append(
+                f"{DIM}Prepare data (recommended, no uv required):{RST}\n"
+                f"  {BOLD}{GR}{tc['prepare_recommended_cmd']}{RST}\n"
+            )
+        if tc.get("train_recommended_cmd"):
+            parts.append(
+                f"{DIM}Train (recommended — python3 / checkout venv):{RST}\n"
+                f"  {BOLD}{GR}{tc['train_recommended_cmd']}{RST}\n"
+            )
+        if tc.get("prepare_uv_cmd"):
+            parts.append(
+                f"{DIM}Prepare (only if `uv` is installed):{RST}\n"
+                f"  {BOLD}{YEL}{tc['prepare_uv_cmd']}{RST}\n"
+            )
+        if tc.get("train_uv_cmd"):
+            parts.append(
+                f"{DIM}Train (only if `uv` is installed):{RST}\n"
+                f"  {BOLD}{YEL}{tc['train_uv_cmd']}{RST}\n"
+            )
+        parts.append(
+            f"{DIM}Hermes tool loop budget: {budget_minutes} min — train `timeout` uses the same span.{RST}\n"
+            f"{DIM}Full JSON: $HERMES_HOME/autoresearch_wallclock_state.json{RST}\n"
+        )
+        self._safe_print("".join(parts))
+
     def run_conversation(
         self,
         user_message: str,
@@ -11331,6 +11535,7 @@ class AIAgent:
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
         self.iteration_budget = IterationBudget(self.max_iterations)
+        self._apply_autoresearch_outer_runtime_budget()
 
         # Log conversation turn start for debugging/observability
         _preview_text = _summarize_user_message_for_log(user_message)
@@ -11613,6 +11818,19 @@ class AIAgent:
                 _turn_exit_reason = "interrupted_by_user"
                 if not self.quiet_mode:
                     self._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
+                break
+            
+            _ar_deadline = getattr(self, "_autoresearch_deadline_ts", None)
+            if _ar_deadline is not None and time.time() >= _ar_deadline:
+                _turn_exit_reason = "autoresearch_outer_runtime_exhausted"
+                self._emit_status(
+                    "⏱️ Autoresearch outer wall-clock budget reached — stopping tool loop"
+                )
+                if not self.quiet_mode:
+                    self._safe_print(
+                        "\n⏱️  Autoresearch wall-clock budget reached — stopping tool loop.\n"
+                    )
+                self._log_autoresearch_wallclock_stop("loop_iteration")
                 break
             
             api_call_count += 1
@@ -14191,6 +14409,38 @@ class AIAgent:
                         assistant_message.tool_calls
                     )
 
+                    _ar_dl_pre = getattr(self, "_autoresearch_deadline_ts", None)
+                    if _ar_dl_pre is not None and time.time() >= _ar_dl_pre:
+                        _turn_exit_reason = "autoresearch_outer_runtime_exhausted"
+                        self._emit_status(
+                            "⏱️ Autoresearch wall-clock reached — skipping pending tool batch"
+                        )
+                        if not self.quiet_mode:
+                            self._safe_print(
+                                "\n⏱️  Autoresearch wall-clock budget reached — "
+                                "skipping pending tool batch.\n"
+                            )
+                        assistant_message.tool_calls = []
+                        if not (assistant_message.content or "").strip():
+                            assistant_message.content = (
+                                "Autoresearch wall-clock budget reached; "
+                                "stopping before executing pending tools."
+                            )
+                        assistant_msg = self._build_assistant_message(
+                            assistant_message, finish_reason
+                        )
+                        messages.append(assistant_msg)
+                        self._emit_interim_assistant_message(assistant_msg)
+                        if self.stream_delta_callback:
+                            try:
+                                self.stream_delta_callback(None)
+                            except Exception:
+                                pass
+                        _txt = assistant_message.content or ""
+                        final_response = self._strip_think_blocks(_txt).strip() or _txt.strip()
+                        self._log_autoresearch_wallclock_stop("pending_tools_skipped")
+                        break
+
                     assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                     
                     # If this turn has both content AND tool_calls, capture the content
@@ -14729,7 +14979,7 @@ class AIAgent:
         if final_response is None and (
             api_call_count >= self.max_iterations
             or self.iteration_budget.remaining <= 0
-        ):
+        ) and _turn_exit_reason != "autoresearch_outer_runtime_exhausted":
             # Budget exhausted — ask the model for a summary via one extra
             # API call with tools stripped.  _handle_max_iterations injects a
             # user message and makes a single toolless request.

@@ -436,10 +436,29 @@ def build_skill_invocation_message(
     except Exception:
         pass  # Non-critical — skill invocation proceeds regardless
 
-    activation_note = (
-        f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want '
-        "you to follow its instructions. The full skill content is loaded below.]"
-    )
+    if skill_name == "autoresearch":
+        activation_note = (
+            '[CRITICAL — /autoresearch] The user started the **autoresearch** workflow. '
+            '**Before** running `terminal`, cloning repos, or `train.py`: '
+            '(1) Ask the user to **paste the full `program.md` body** (or give a path to read). '
+            '(2) Ask for **outer wall-clock minutes** for the Hermes tool loop. '
+            'Do not skip these prompts or invent durations. '
+            'Canonical layout: training code under `$HERMES_HOME/skills/software-development/'
+            'repo-autoresearch-cpu/checkout/` (Hermes **skills** tree — **not** `skills-repos`). '
+            'Clone https://github.com/cam-douglas/autoresearch-cpu.git into `checkout/` if missing. '
+            'Prefer `python3` / a project venv when `uv` is unavailable. '
+            'When the Hermes outer wall-clock arms, the runtime prints **exact** colored '
+            'one-liners for `prepare.py` / `train.py` (and mirrors them in '
+            '`$HERMES_HOME/autoresearch_wallclock_state.json`). **Tell the user to copy '
+            'the green train line** into a second terminal — do **not** use `uv run` in '
+            'background/terminal unless `command -v uv` succeeds on that host. '
+            'After answers, write `checkout/program.md` and align `HERMES_AUTORESEARCH_OUTER_MINUTES`.]'
+        )
+    else:
+        activation_note = (
+            f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want '
+            "you to follow its instructions. The full skill content is loaded below.]"
+        )
     return _build_skill_message(
         loaded_skill,
         skill_dir,
