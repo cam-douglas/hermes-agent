@@ -145,6 +145,7 @@ from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    TERMINAL_OUTPUT_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
     build_nous_subscription_prompt,
@@ -166,7 +167,7 @@ from agent.adaptive_routing import (
     resolve_route as resolve_adaptive_route,
     status_payload as routing_status_payload,
 )
-from agent.spend_governance import record_spend, read_spend_snapshots, snapshots_to_payloads
+from agent.spend_governance import record_spend, snapshots_to_payloads
 from agent.fallback_triggers import is_enabled_trigger, trigger_for_error
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -1172,6 +1173,8 @@ class AIAgent:
 
         self.model = model
         self.max_iterations = max_iterations
+        # Restored when autoresearch arms then later turns deactivate (cached gateway agents).
+        self._baseline_max_iterations = int(max_iterations)
         # Shared iteration budget — parent creates, children inherit.
         # Consumed by every LLM turn across parent + all subagents.
         self.iteration_budget = iteration_budget or IterationBudget(max_iterations)
@@ -2871,48 +2874,6 @@ class AIAgent:
         )
         return response.choices[0].message.content or ""
 
-    def _current_profile_name(self) -> str:
-        try:
-            from hermes_cli.profiles import get_active_profile
-            name = get_active_profile()
-            if name:
-                return name
-        except Exception:
-            pass
-        return get_hermes_home().name or "default"
-
-    def _spend_governance_preflight(self) -> None:
-        """Update turn spend state before routing/model selection."""
-        cfg = self._spend_governance_cfg
-        if not cfg.get("enabled"):
-            self._spend_hard_cap_block_consultant = False
-            return
-
-        try:
-            snapshots = read_spend_snapshots(
-                cfg,
-                session_id=self.session_id,
-                parent_session_id=getattr(self, "_parent_session_id", None),
-            )
-            self._spend_hard_cap_block_consultant = False
-            if not snapshots:
-                return
-            on_soft = str(cfg.get("on_soft_cap") or "warn_footer")
-            on_hard = str(cfg.get("on_hard_cap") or "block_consultant")
-            for payload in snapshots_to_payloads(snapshots):
-                if payload.get("period") == "turn":
-                    hard = payload.get("hard_cap_usd")
-                    spent = payload.get("spent_usd_est")
-                    if hard is not None and spent is not None and float(spent) >= float(hard):
-                        self._spend_hard_cap_block_consultant = on_hard == "block_consultant"
-                if payload.get("soft_cap_usd") is not None and payload.get("spent_usd_est") is not None:
-                    if on_soft == "warn_footer":
-                        self._emit_structured_status("spend", payload)
-                if payload.get("hard_cap_usd") is not None and payload.get("spent_usd_est") is not None:
-                    self._emit_structured_status("spend", payload)
-        except Exception:
-            logger.debug("spend governance preflight failed", exc_info=True)
-
     def _maybe_apply_adaptive_routing(self, user_message: str) -> None:
         """Resolve and apply a per-turn model route when enabled."""
         cfg = self._adaptive_routing_cfg
@@ -2928,76 +2889,11 @@ class AIAgent:
         if cfg.get("observability_channel", "footer") != "none":
             self._emit_structured_status("routing", routing_status_payload(decision))
 
-        org_cfg = self._org_escalation_cfg
-        require_org_approval = bool(org_cfg.get("enabled") and org_cfg.get("require_consultant_approval", True))
-        consultant_approved = bool(decision.approval)
-        if decision.tier == "consultant" and require_org_approval:
-            consultant_approved = bool(
-                self._consultant_approval
-                and self._consultant_approval.get("approved")
-                and (
-                    not self._consultant_approval.get("target_model")
-                    or self._consultant_approval.get("target_model") == decision.target_model
-                )
-            )
-            if not consultant_approved:
-                self._emit_structured_status("escalation", {
-                    "phase": "denied",
-                    "target_model": decision.target_model,
-                    "approved": False,
-                    "reason_code": "pending_router",
-                    "trace_id": self.session_id,
-                })
-                decision = type(decision)(
-                    tier="baseline",
-                    target_model=str(cfg.get("baseline_model") or self.model),
-                    reason_code="org_approval_required",
-                    approval=None,
-                    router_notes=decision.router_notes,
-                    router_model=decision.router_model,
-                    latency_ms=decision.latency_ms,
-                    error=decision.error,
-                )
-
-        if decision.tier == "consultant" and getattr(self, "_spend_hard_cap_block_consultant", False):
-            self._emit_structured_status("spend", {
-                "scope": "spend",
-                "period": "turn",
-                "spent_usd_est": None,
-                "soft_cap_usd": None,
-                "hard_cap_usd": None,
-                "proximity": None,
-                "action": "block_consultant",
-            })
-            self._emit_structured_status("escalation", {
-                "phase": "denied",
-                "target_model": decision.target_model,
-                "approved": False,
-                "reason_code": "hard_cap_block_consultant",
-                "trace_id": self.session_id,
-            })
-            decision = type(decision)(
-                tier="baseline",
-                target_model=str(cfg.get("baseline_model") or self.model),
-                reason_code="hard_cap_block_consultant",
-                approval=None,
-                router_notes=decision.router_notes,
-                router_model=decision.router_model,
-                latency_ms=decision.latency_ms,
-                error=decision.error,
-            )
-
         if decision.tier == "consultant":
-            self._consultant_approval = {
-                "approved": consultant_approved,
-                "target_model": decision.target_model,
-                "reason_code": decision.reason_code,
-                "trace_id": self.session_id,
-            }
             self._emit_structured_status("escalation", {
-                "phase": "approved" if consultant_approved else "denied",
+                "phase": "approved" if decision.approval else "denied",
                 "target_model": decision.target_model,
-                "approved": consultant_approved,
+                "approved": bool(decision.approval),
                 "reason_code": decision.reason_code,
                 "trace_id": self.session_id,
             })
@@ -3013,7 +2909,7 @@ class AIAgent:
         ttl = cfg.get("ephemeral_ttl_hours")
         payload: Dict[str, Any] = {
             "scope": "profile",
-            "name": self._current_profile_name(),
+            "name": get_hermes_home().name,
             "ephemeral": marker.exists(),
             "ttl_hours_remaining": None,
         }
@@ -5525,6 +5421,7 @@ class AIAgent:
 
         # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
         prompt_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+        prompt_parts.append(TERMINAL_OUTPUT_GUIDANCE)
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
@@ -10194,7 +10091,6 @@ class AIAgent:
         body = ("\n" + indent).join(out_lines)
         return f"{indent}{label}{body}"
 
-
     def _is_memory_family_tool_name(self, name: str) -> bool:
         if name == "memory":
             return True
@@ -10245,6 +10141,7 @@ class AIAgent:
             },
             ensure_ascii=False,
         )
+
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
 
@@ -11283,6 +11180,17 @@ class AIAgent:
 
         return final_response
 
+    def _autoresearch_scope_key(self) -> Optional[str]:
+        """CLI session id or gateway session key for scoped canonical ``program.md``."""
+        g = (getattr(self, "_gateway_session_key", None) or "").strip()
+        s = (getattr(self, "session_id", None) or "").strip()
+        return g or s or None
+
+    def _autoresearch_messaging_gateway_mode(self) -> bool:
+        """Non-CLI platforms: do not auto-arm autoresearch from shared checkout/env."""
+        p = (self.platform or "").strip().lower()
+        return bool(p) and p not in ("cli", "local")
+
     def _apply_autoresearch_outer_runtime_budget(self) -> None:
         """Raise iteration cap and arm wall-clock stop when autoresearch program.md is active."""
         if getattr(self, "_delegate_depth", 0) > 0:
@@ -11297,11 +11205,17 @@ class AIAgent:
             logger.debug("autoresearch_runtime unavailable: %s", exc)
             return
 
-        loaded = load_autoresearch_outer_runtime_minutes()
+        loaded = load_autoresearch_outer_runtime_minutes(
+            scope_key=self._autoresearch_scope_key(),
+            messaging_gateway=self._autoresearch_messaging_gateway_mode(),
+        )
         if loaded is None:
             self._autoresearch_deadline_ts = None
             self._autoresearch_started_ts = None
             self._autoresearch_budget_minutes = None
+            _baseline = getattr(self, "_baseline_max_iterations", None)
+            if _baseline is not None and self.max_iterations != _baseline:
+                self.max_iterations = _baseline
             clear_autoresearch_wallclock_state()
             return
 
@@ -11373,6 +11287,13 @@ class AIAgent:
             elapsed_min,
             budget,
         )
+        if detail in ("loop_iteration", "pending_tools_skipped"):
+            try:
+                from tools.autoresearch_runtime import clear_autoresearch_engaged_scope
+
+                clear_autoresearch_engaged_scope()
+            except Exception:
+                pass
 
     def _emit_autoresearch_follow_banner(
         self, *, budget_minutes: int, provenance: str
@@ -11388,7 +11309,11 @@ class AIAgent:
                 resolve_autoresearch_checkout_dir,
             )
 
-            checkout = resolve_autoresearch_checkout_dir()
+            _mgw = self._autoresearch_messaging_gateway_mode()
+            checkout = resolve_autoresearch_checkout_dir(
+                self._autoresearch_scope_key(),
+                messaging_gateway=_mgw,
+            )
             tc = format_autoresearch_train_commands(
                 checkout_dir=checkout,
                 budget_minutes=budget_minutes,
@@ -11544,9 +11469,7 @@ class AIAgent:
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
 
-        self._spend_governance_preflight()
         self._emit_profile_state()
-        self._spend_governance_preflight()
         self._maybe_apply_adaptive_routing(user_message)
 
         # Store stream callback for _interruptible_api_call to pick up
@@ -11890,7 +11813,7 @@ class AIAgent:
                 if not self.quiet_mode:
                     self._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
                 break
-            
+
             _ar_deadline = getattr(self, "_autoresearch_deadline_ts", None)
             if _ar_deadline is not None and time.time() >= _ar_deadline:
                 _turn_exit_reason = "autoresearch_outer_runtime_exhausted"

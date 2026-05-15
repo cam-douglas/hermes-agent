@@ -61,6 +61,98 @@ class TestLoadAutoresearchOuterRuntime:
 
 
 class TestResolveProgramPath:
+    def test_implicit_canonical_skipped_by_default(self, tmp_path, monkeypatch):
+        from tools import autoresearch_runtime as ar
+
+        monkeypatch.delenv("HERMES_AUTORESEARCH_PROGRAM", raising=False)
+        monkeypatch.delenv("HERMES_AUTORESEARCH_OUTER_MINUTES", raising=False)
+        monkeypatch.delenv("HERMES_AUTORESEARCH_IMPLICIT_CANONICAL", raising=False)
+        home = tmp_path
+        monkeypatch.setattr(ar, "_get_hermes_home", lambda: home)
+        checkout = home / "skills/software-development/repo-autoresearch-cpu/checkout"
+        checkout.mkdir(parents=True)
+        (checkout / "program.md").write_text("# autoresearch\n\nx\n")
+        assert resolve_autoresearch_program_path() is None
+        assert load_autoresearch_outer_runtime_minutes() is None
+
+    def test_implicit_canonical_when_opt_in_env(self, tmp_path, monkeypatch):
+        from tools import autoresearch_runtime as ar
+
+        monkeypatch.delenv("HERMES_AUTORESEARCH_PROGRAM", raising=False)
+        monkeypatch.delenv("HERMES_AUTORESEARCH_OUTER_MINUTES", raising=False)
+        monkeypatch.setenv("HERMES_AUTORESEARCH_IMPLICIT_CANONICAL", "1")
+        home = tmp_path
+        monkeypatch.setattr(ar, "_get_hermes_home", lambda: home)
+        checkout = home / "skills/software-development/repo-autoresearch-cpu/checkout"
+        checkout.mkdir(parents=True)
+        p = checkout / "program.md"
+        p.write_text("# autoresearch\n\nOuter runtime: 9 minutes\n")
+        assert resolve_autoresearch_program_path(scope_key="any") == p.resolve()
+        assert load_autoresearch_outer_runtime_minutes(scope_key="any") == (
+            9,
+            str(p.resolve()),
+        )
+
+    def test_engaged_scope_allows_canonical_without_implicit(
+        self, tmp_path, monkeypatch
+    ):
+        from tools import autoresearch_runtime as ar
+
+        monkeypatch.delenv("HERMES_AUTORESEARCH_PROGRAM", raising=False)
+        monkeypatch.delenv("HERMES_AUTORESEARCH_OUTER_MINUTES", raising=False)
+        monkeypatch.delenv("HERMES_AUTORESEARCH_IMPLICIT_CANONICAL", raising=False)
+        home = tmp_path
+        monkeypatch.setattr(ar, "_get_hermes_home", lambda: home)
+        checkout = home / "skills/software-development/repo-autoresearch-cpu/checkout"
+        checkout.mkdir(parents=True)
+        p = checkout / "program.md"
+        p.write_text("# autoresearch\n\nOuter runtime: 7 minutes\n")
+        ar.set_autoresearch_engaged_scope("chat-alpha")
+        assert resolve_autoresearch_program_path(scope_key="chat-alpha") == p.resolve()
+        assert resolve_autoresearch_program_path(scope_key="chat-beta") is None
+        assert load_autoresearch_outer_runtime_minutes(scope_key="chat-alpha") == (
+            7,
+            str(p.resolve()),
+        )
+        ar.clear_autoresearch_engaged_scope()
+
+    def test_implicit_canonical_suppressed_on_messaging_gateway(
+        self, tmp_path, monkeypatch
+    ):
+        from tools import autoresearch_runtime as ar
+
+        monkeypatch.delenv("HERMES_AUTORESEARCH_PROGRAM", raising=False)
+        monkeypatch.delenv("HERMES_AUTORESEARCH_OUTER_MINUTES", raising=False)
+        monkeypatch.setenv("HERMES_AUTORESEARCH_IMPLICIT_CANONICAL", "1")
+        home = tmp_path
+        monkeypatch.setattr(ar, "_get_hermes_home", lambda: home)
+        checkout = home / "skills/software-development/repo-autoresearch-cpu/checkout"
+        checkout.mkdir(parents=True)
+        p = checkout / "program.md"
+        p.write_text("# autoresearch\n\nOuter runtime: 9 minutes\n")
+        assert resolve_autoresearch_program_path(
+            scope_key="any", messaging_gateway=True
+        ) is None
+        assert load_autoresearch_outer_runtime_minutes(
+            scope_key="any", messaging_gateway=True
+        ) is None
+
+    def test_outer_minutes_env_suppressed_on_messaging_without_engagement(
+        self, monkeypatch
+    ):
+        from tools import autoresearch_runtime as ar
+
+        monkeypatch.setenv("HERMES_AUTORESEARCH_OUTER_MINUTES", "500")
+        monkeypatch.delenv("HERMES_AUTORESEARCH_PROGRAM", raising=False)
+        assert load_autoresearch_outer_runtime_minutes(
+            scope_key="sms:dm:1", messaging_gateway=True
+        ) is None
+        ar.set_autoresearch_engaged_scope("sms:dm:1")
+        assert load_autoresearch_outer_runtime_minutes(
+            scope_key="sms:dm:1", messaging_gateway=True
+        ) == (500, "env:HERMES_AUTORESEARCH_OUTER_MINUTES")
+        ar.clear_autoresearch_engaged_scope()
+
     def test_missing_env_file(self, monkeypatch):
         monkeypatch.setenv("HERMES_AUTORESEARCH_PROGRAM", "/nonexistent/program.md")
         assert resolve_autoresearch_program_path() is None
