@@ -4,9 +4,15 @@
  * Mirrors Hermes gateway behavior: prefer a `hermes` shim on PATH, then fall
  * back to `python3 -m hermes_cli.main` when the package is installed but the
  * console script is not exposed (common with venvs / systemd services).
+ *
+ * Also tries well-known install locations (e.g. ~/.local/bin/hermes) because
+ * GUI/IDE-launched Node processes often inherit a minimal PATH that omits
+ * `~/.local/bin` even though the shim exists.
  */
 
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { platform } from "node:process";
 import { promisify } from "node:util";
 
 import { HERMES_CLI } from "../shared/constants.js";
@@ -20,17 +26,67 @@ export type HermesInvocation = {
 
 const PYTHON_CANDIDATES = ["python3", "python"] as const;
 
-export async function resolveHermesInvocation(preferred?: string): Promise<HermesInvocation> {
-  const tryBin = (preferred?.trim() || HERMES_CLI) || HERMES_CLI;
+/** Extra shims to try when bare ``hermes`` is not on PATH (minimal GUI PATH). */
+function extraHermesShimPaths(preferred: string): string[] {
+  const out: string[] = [];
+  const push = (s?: string) => {
+    const t = s?.trim();
+    if (t && !out.includes(t)) {
+      out.push(t);
+    }
+  };
 
+  push(process.env.HERMES_CLI);
+  push(process.env.HERMES_COMMAND);
+
+  const repo = process.env.HERMES_AGENT_REPO?.trim();
+  if (repo && platform !== "win32") {
+    push(`${repo}/venv/bin/hermes`);
+    push(`${repo}/.venv/bin/hermes`);
+  }
+
+  const home = homedir();
+  if (home) {
+    if (platform === "win32") {
+      push(`${home}\\.local\\bin\\hermes.exe`);
+    } else {
+      push(`${home}/.local/bin/hermes`);
+    }
+  }
+
+  if (platform !== "win32") {
+    push("/opt/homebrew/bin/hermes");
+    push("/usr/local/bin/hermes");
+  }
+
+  return out.filter((p) => p !== preferred);
+}
+
+async function tryShim(path: string): Promise<HermesInvocation | null> {
   try {
-    await execFileAsync(tryBin, ["--version"], { timeout: 10_000 });
-    return { command: tryBin, argsPrefix: [] };
+    await execFileAsync(path, ["--version"], { timeout: 10_000 });
+    return { command: path, argsPrefix: [] };
   } catch (err: unknown) {
     const e = err as NodeJS.ErrnoException;
     if (e.code !== "ENOENT") {
-      // Binary exists but --version failed — still use it (matches prior adapter behavior).
-      return { command: tryBin, argsPrefix: [] };
+      return { command: path, argsPrefix: [] };
+    }
+    return null;
+  }
+}
+
+export async function resolveHermesInvocation(preferred?: string): Promise<HermesInvocation> {
+  const first = (preferred?.trim() || HERMES_CLI) || HERMES_CLI;
+
+  const attemptPaths = [first, ...extraHermesShimPaths(first)];
+
+  for (const path of attemptPaths) {
+    if (!path) {
+      continue;
+    }
+    const hit = await tryShim(path);
+    if (hit) {
+      return hit;
     }
   }
 
@@ -43,11 +99,10 @@ export async function resolveHermesInvocation(preferred?: string): Promise<Herme
       if (e.code === "ENOENT") {
         continue;
       }
-      // Python found but module invocation failed — try next interpreter.
     }
   }
 
-  const notFound = new Error(`Hermes CLI "${tryBin}" not found in PATH`);
+  const notFound = new Error(`Hermes CLI "${first}" not found in PATH`);
   (notFound as NodeJS.ErrnoException).code = "ENOENT";
   throw notFound;
 }

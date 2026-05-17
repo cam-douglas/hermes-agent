@@ -77,7 +77,9 @@ Paperclip’s **Hermes Agent** adapter runs `hermes --version`. If the server us
 pnpm add "file:/absolute/path/to/hermes-agent/contrib/hermes-paperclip-adapter"
 ```
 
-Rebuild/restart Paperclip. Alternatively, put the venv `bin` on the **server** process `PATH`, or set the agent’s **custom Hermes command** to the absolute path of the `hermes` binary.
+Rebuild/restart Paperclip. The adapter tries `~/.local/bin/hermes`, Homebrew paths, and `HERMES_AGENT_REPO/venv/bin/hermes` when `hermes` is missing from the server `PATH`. You can also set **`HERMES_CLI`** to the absolute shim path (`which hermes`) in the environment of the Paperclip **server** process.
+
+Alternatively, put the venv `bin` on the **server** process `PATH`, or set the agent’s **custom Hermes command** to the absolute path of the `hermes` binary.
 
 ## Agent behavior
 

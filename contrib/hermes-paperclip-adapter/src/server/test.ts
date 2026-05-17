@@ -236,7 +236,7 @@ export async function testEnvironment(
         level: "error",
         message: `Hermes CLI "${command}" not found in PATH`,
         hint:
-          "Install Hermes Agent (`pip install hermes-agent`) or ensure `python3 -m hermes_cli.main --version` works (venv installs often omit the `hermes` shim from the Paperclip process PATH).",
+          "Install Hermes Agent (`pip install hermes-agent`). If `hermes` works in your terminal but fails here, the Paperclip server PATH may be minimal — set `HERMES_CLI` to the full path of the shim (run `which hermes` in a terminal) or ensure `~/.local/bin` is on PATH for the Paperclip process. The adapter also probes `~/.local/bin/hermes` and Homebrew paths automatically.",
         code: "hermes_cli_not_found",
       });
     } else {

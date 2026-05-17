@@ -6,7 +6,7 @@ This tree is a **fork of [NousResearch/hermes-paperclip-adapter](https://github.
   `python3 -m hermes_cli.main` / `python -m hermes_cli.main` (same idea as Hermes gateway `_resolve_hermes_bin`).  
   That fixes Paperclip “Adapter environment check” failures when Hermes is installed in a venv but the Paperclip server process does not inherit the venv’s `bin` directory on `PATH`.
 
-Version here: **0.3.1** (not yet published to npm).
+Version here: **0.3.2** (not yet published to npm).
 
 ## Use in a Paperclip checkout
 
