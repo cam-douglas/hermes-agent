@@ -335,6 +335,23 @@ class TestSlackNativeSlashes:
         assert "reset" in names
         assert "q" in names
 
+    def test_paperclip_alias_not_second_slack_slash(self):
+        """``/pc`` must not consume a Slack slash slot when ``/paperclip`` exists."""
+        names = {n for n, _d, _h in slack_native_slashes()}
+        assert "paperclip" in names
+        assert "pc" not in names
+
+    def test_paperclip_pc_still_resolves(self):
+        assert resolve_command("pc") is not None
+        assert resolve_command("pc").name == "paperclip"
+
+    def test_paperclip_pc_not_in_cli_command_map(self):
+        assert "/paperclip" in COMMANDS
+        assert "/pc" not in COMMANDS
+        info_lines = [ln for ln in gateway_help_lines() if "paperclip" in ln.lower()]
+        assert info_lines
+        assert "`/pc`" not in info_lines[0]
+
     def test_telegram_parity(self):
         """Every Telegram bot command must be registerable on Slack too.
 
@@ -590,7 +607,7 @@ class TestSlashCommandCompleter:
         assert "Skill command" in completions[0].display_meta_text
 
     def test_plugin_slash_hidden_when_skill_claims_same_name(self, monkeypatch):
-        """Skills win over plugin registration for the same slash (e.g. /paperclip)."""
+        """Built-in ``/paperclip`` wins over skill and plugin dupes for the same slash."""
         monkeypatch.setattr(
             "hermes_cli.plugins.get_plugin_commands",
             lambda: {"paperclip": {"description": "Plugin duplicate"}},
@@ -603,8 +620,9 @@ class TestSlashCommandCompleter:
         completions = _completions(completer, "/paper")
         paper = [c for c in completions if "paperclip" in (c.display_text or "").lower()]
         assert len(paper) == 1
-        assert "⚡" in (paper[0].display_meta_text or "")
+        assert "⚡" not in (paper[0].display_meta_text or "")
         assert "🔌" not in (paper[0].display_meta_text or "")
+        assert "open paperclip" in (paper[0].display_meta_text or "").lower()
 
     def test_paperclip_family_plugin_hidden_when_unified_skill_active(
         self, monkeypatch,
