@@ -234,10 +234,26 @@ export async function testEnvironment(ctx) {
     const versionCheck = await checkCliVersion(inv);
     if (versionCheck)
         checks.push(versionCheck);
-    // 3. Python available?
+    // 3. Python on PATH (optional — Paperclip prompts sometimes use `python3 -c`).
+    // When Hermes resolves as a **native shim**, it uses its own embedded interpreter;
+    // macOS `/usr/bin/python3` is often 3.9 and must not fail this check.
     const pythonCheck = await checkPython();
-    if (pythonCheck)
-        checks.push(pythonCheck);
+    if (pythonCheck) {
+        const downgradeNonBlocking = inv.argsPrefix.length === 0 &&
+            pythonCheck.level === "error" &&
+            (pythonCheck.code === "hermes_python_old" || pythonCheck.code === "hermes_python_missing");
+        if (downgradeNonBlocking) {
+            checks.push({
+                level: "warn",
+                message: `${pythonCheck.message} (non-blocking: Hermes CLI uses its own Python — see version line above).`,
+                hint: pythonCheck.hint,
+                code: `${pythonCheck.code}_nonblocking`,
+            });
+        }
+        else {
+            checks.push(pythonCheck);
+        }
+    }
     // 4. Model config
     const modelCheck = checkModel(config);
     if (modelCheck)
