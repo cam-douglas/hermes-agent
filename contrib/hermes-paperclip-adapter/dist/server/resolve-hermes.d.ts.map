@@ -1,0 +1,1 @@
+{"version":3,"file":"resolve-hermes.d.ts","sourceRoot":"","sources":["../../src/server/resolve-hermes.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AASH,MAAM,MAAM,gBAAgB,GAAG;IAC7B,OAAO,EAAE,MAAM,CAAC;IAChB,UAAU,EAAE,MAAM,EAAE,CAAC;CACtB,CAAC;AAIF,wBAAsB,uBAAuB,CAAC,SAAS,CAAC,EAAE,MAAM,GAAG,OAAO,CAAC,gBAAgB,CAAC,CA8B3F"}
