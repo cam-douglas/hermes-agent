@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import sys
+import time
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -15,6 +16,7 @@ from tools.mcp_oauth import (
     OAuthNonInteractiveError,
     build_oauth_auth,
     remove_oauth_tokens,
+    oauth_http_auth_feasible,
     _find_free_port,
     _can_open_browser,
     _is_interactive,
@@ -239,6 +241,159 @@ class TestUtilities:
         monkeypatch.setenv("DISPLAY", ":0")
         monkeypatch.setattr(os, "name", "posix")
         assert _can_open_browser() is True
+
+
+class TestOauthHttpAuthFeasible:
+    def test_false_without_tokens_headless_linux(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        monkeypatch.delenv("SSH_TTY", raising=False)
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(os, "uname", lambda: type("", (), {"sysname": "Linux"})())
+        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
+        assert oauth_http_auth_feasible("zapier") is False
+
+    def test_false_with_cached_tokens_ssh_when_not_usable_headlessly(self, tmp_path, monkeypatch):
+        """Bare token file without TTL/refresh must not force browser OAuth over SSH."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("SSH_CLIENT", "1.2.3.4 1234 22")
+        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
+        d = tmp_path / "mcp-tokens"
+        d.mkdir()
+        (d / "zapier.json").write_text('{"access_token":"x","token_type":"Bearer"}')
+        assert oauth_http_auth_feasible("zapier") is False
+
+    def test_true_with_cached_tokens_ssh_when_access_not_expired(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("SSH_CLIENT", "1.2.3.4 1234 22")
+        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
+        d = tmp_path / "mcp-tokens"
+        d.mkdir()
+        future = int(time.time()) + 3600
+
+        (d / "zapier.json").write_text(
+            json.dumps(
+                {"access_token": "x", "token_type": "Bearer", "expires_at": future}
+            )
+        )
+        assert oauth_http_auth_feasible("zapier") is True
+
+    def test_true_with_cached_tokens_headless_linux_valid_access(self, tmp_path, monkeypatch):
+        """Non-SSH headless Linux with comfortable access TTL can still use tokens."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        monkeypatch.delenv("SSH_TTY", raising=False)
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        monkeypatch.setattr(os, "name", "posix")
+        monkeypatch.setattr(os, "uname", lambda: type("", (), {"sysname": "Linux"})())
+        d = tmp_path / "mcp-tokens"
+        d.mkdir()
+        future = int(time.time()) + 3600
+
+        (d / "zapier.json").write_text(
+            json.dumps(
+                {"access_token": "x", "token_type": "Bearer", "expires_at": future}
+            )
+        )
+        assert oauth_http_auth_feasible("zapier") is True
+
+    def test_true_when_allow_headless_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", "1")
+        assert oauth_http_auth_feasible("zapier") is True
+
+
+# ---------------------------------------------------------------------------
+# OAuth redirect handler (browser auto-open)
+# ---------------------------------------------------------------------------
+
+class TestRedirectHandlerNoBrowser:
+    """HERMES_MCP_OAUTH_NO_BROWSER must skip webbrowser.open (macOS ignores BROWSER=)."""
+
+    @pytest.fixture
+    def graphical_posix(self, monkeypatch):
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        monkeypatch.delenv("SSH_TTY", raising=False)
+        monkeypatch.setenv("DISPLAY", ":0")
+        monkeypatch.setattr(os, "name", "posix")
+
+    def test_no_browser_env_skips_webbrowser_open(self, graphical_posix, monkeypatch, capsys):
+        monkeypatch.setenv("HERMES_MCP_OAUTH_NO_BROWSER", "1")
+        import asyncio
+
+        from tools import mcp_oauth as mod
+
+        with patch.object(mod.webbrowser, "open", return_value=True) as m_open:
+            asyncio.run(mod._redirect_handler("https://example.com/oauth?x=1"))
+        m_open.assert_not_called()
+        err = capsys.readouterr().err
+        assert "Automatic browser open disabled" in err
+        assert "https://example.com/oauth?x=1" in err
+
+    def test_without_env_calls_webbrowser_when_allowed(self, graphical_posix, monkeypatch, capsys):
+        monkeypatch.delenv("HERMES_MCP_OAUTH_NO_BROWSER", raising=False)
+        import asyncio
+
+        from tools import mcp_oauth as mod
+
+        with patch.object(mod.webbrowser, "open", return_value=True) as m_open:
+            asyncio.run(mod._redirect_handler("https://example.com/authorize"))
+        m_open.assert_called_once_with("https://example.com/authorize")
+        assert capsys.readouterr().err.count("https://example.com/authorize") >= 1
+
+    def test_make_redirect_handler_open_browser_false_skips_webbrowser(
+        self, graphical_posix, monkeypatch, capsys,
+    ):
+        monkeypatch.delenv("HERMES_MCP_OAUTH_NO_BROWSER", raising=False)
+        import asyncio
+
+        from tools import mcp_oauth as mod
+
+        handler = mod.make_redirect_handler({"_resolved_port": 9876, "open_browser": False})
+        with patch.object(mod.webbrowser, "open", return_value=True) as m_open:
+            asyncio.run(handler("https://example.com/zap"))
+        m_open.assert_not_called()
+        err = capsys.readouterr().err
+        assert "127.0.0.1:9876/callback" in err
+        assert "https://example.com/zap" in err
+
+    def test_emit_aborts_ssh_before_printing_url(self, monkeypatch):
+        monkeypatch.setenv("SSH_CLIENT", "192.168.1.1 12345 22")
+        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
+        import asyncio
+
+        from tools import mcp_oauth as mod
+
+        with pytest.raises(mod.OAuthNonInteractiveError):
+            asyncio.run(
+                mod._emit_mcp_oauth_authorization_url(
+                    "https://evil.example/oauth?nope=1",
+                    open_browser=True,
+                    callback_port=5555,
+                )
+            )
+
+    def test_emit_prints_url_when_allow_headless_over_ssh(self, monkeypatch, capsys):
+        monkeypatch.setenv("SSH_CLIENT", "192.168.1.1 12345 22")
+        monkeypatch.setenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", "1")
+        monkeypatch.setenv("HERMES_MCP_OAUTH_NO_BROWSER", "1")
+        import asyncio
+
+        from tools import mcp_oauth as mod
+
+        asyncio.run(
+            mod._emit_mcp_oauth_authorization_url(
+                "https://example.com/oauth",
+                open_browser=True,
+                callback_port=None,
+            )
+        )
+        err = capsys.readouterr().err
+        assert "https://example.com/oauth" in err
 
 
 # ---------------------------------------------------------------------------

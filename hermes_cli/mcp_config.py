@@ -282,9 +282,20 @@ def cmd_mcp_add(args):
         print()
         _info(f"Starting OAuth flow for '{name}'...")
         oauth_ok = False
+        oauth_auth = None
         try:
+            from tools.mcp_oauth import oauth_http_auth_feasible
             from tools.mcp_oauth_manager import get_manager
-            oauth_auth = get_manager().get_or_build_provider(name, url, None)
+
+            if not oauth_http_auth_feasible(name):
+                _warning(
+                    f"Skipping OAuth setup for '{name}' — browser flow is not available "
+                    "here (SSH/headless and no usable cached tokens). "
+                    "Run `hermes mcp login {name}` where you have a display, "
+                    "or set HERMES_MCP_OAUTH_ALLOW_HEADLESS=1."
+                )
+            else:
+                oauth_auth = get_manager().get_or_build_provider(name, url, None)
             if oauth_auth:
                 server_config["auth"] = "oauth"
                 _success("OAuth configured (tokens will be acquired on first connection)")
@@ -629,7 +640,11 @@ def cmd_mcp_login(args):
     print()
     _info(f"Starting OAuth flow for '{name}'...")
 
-    # Probe triggers the OAuth flow (browser redirect + callback capture).
+    no_browser = getattr(args, "no_browser", False)
+    prev_no_browser = os.environ.get("HERMES_MCP_OAUTH_NO_BROWSER") if no_browser else None
+    if no_browser:
+        os.environ["HERMES_MCP_OAUTH_NO_BROWSER"] = "1"
+
     try:
         tools = _probe_single_server(name, server_config)
         if tools:
@@ -638,6 +653,12 @@ def cmd_mcp_login(args):
             _success("Authenticated (server reported no tools)")
     except Exception as exc:
         _error(f"Authentication failed: {exc}")
+    finally:
+        if no_browser:
+            if prev_no_browser is None:
+                os.environ.pop("HERMES_MCP_OAUTH_NO_BROWSER", None)
+            else:
+                os.environ["HERMES_MCP_OAUTH_NO_BROWSER"] = prev_no_browser
 
 
 # ─── hermes mcp configure ────────────────────────────────────────────────────
