@@ -589,6 +589,55 @@ class TestSlashCommandCompleter:
         assert len(completions) == 1
         assert "Skill command" in completions[0].display_meta_text
 
+    def test_plugin_slash_hidden_when_skill_claims_same_name(self, monkeypatch):
+        """Skills win over plugin registration for the same slash (e.g. /paperclip)."""
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_commands",
+            lambda: {"paperclip": {"description": "Plugin duplicate"}},
+        )
+        completer = SlashCommandCompleter(
+            skill_commands_provider=lambda: {
+                "/paperclip": {"description": "Canonical skill"},
+            }
+        )
+        completions = _completions(completer, "/paper")
+        paper = [c for c in completions if "paperclip" in (c.display_text or "").lower()]
+        assert len(paper) == 1
+        assert "⚡" in (paper[0].display_meta_text or "")
+        assert "🔌" not in (paper[0].display_meta_text or "")
+
+    def test_paperclip_family_plugin_hidden_when_unified_skill_active(
+        self, monkeypatch,
+    ):
+        """``paperclip-*`` plugins must not autocomplete alongside unified ``/paperclip``."""
+        from unittest.mock import patch
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_commands",
+            lambda: {
+                "paperclip-dev": {"description": "Plugin duplicate"},
+            },
+        )
+        with patch("agent.skill_commands.get_skill_commands", return_value={"/paperclip": {}}):
+            completer = SlashCommandCompleter(
+                skill_commands_provider=lambda: {
+                    "/paperclip": {"description": "Canonical skill"},
+                }
+            )
+        completions = _completions(completer, "/paperclip")
+        paper = [
+            c for c in completions
+            if c.display_text and "paperclip" in c.display_text.lower()
+        ]
+        assert len(paper) == 1
+        # Built-in /paperclip (registry) wins over the skill provider; no 🔌 duplicate.
+        assert "🔌" not in (paper[0].display_meta_text or "")
+        assert not [
+            c
+            for c in completions
+            if "paperclip-dev" in (c.display_text or "").lower()
+        ]
+
 
 # ── SUBCOMMANDS extraction ──────────────────────────────────────────────
 
@@ -1727,6 +1776,60 @@ class TestPluginCommandEnumeration:
         names = {name for name, _desc in telegram_bot_commands()}
         assert "my_plugin_cmd" in names
         assert "my-plugin-cmd" not in names
+
+    def test_paperclip_family_plugin_suppressed_when_unified_skill_active(
+        self, monkeypatch,
+    ):
+        """Legacy paperclip-* plugin slashes must not duplicate ``/paperclip``."""
+        from unittest.mock import patch
+
+        self._patch_plugin_commands(monkeypatch, {
+            "paperclip-dev": {
+                "handler": lambda _a: "ok",
+                "description": "Legacy Paperclip plugin",
+                "args_hint": "",
+                "plugin": "legacy-paperclip",
+            }
+        })
+        fake_skill_map = {
+            "/paperclip": {
+                "name": "paperclip-dot-hermes-bridge",
+                "description": "Skill",
+                "skill_md_path": "/x/SKILL.md",
+                "skill_dir": "/x",
+            }
+        }
+        with patch("agent.skill_commands.get_skill_commands", return_value=fake_skill_map):
+            names = {name for name, _desc in telegram_bot_commands()}
+        assert "paperclip_dev" not in names
+        assert "paperclip" in names  # built-in gateway /paperclip (not plugin paperclip-dev)
+
+    def test_paperclip_family_plugin_visible_without_unified_skill(
+        self, monkeypatch,
+    ):
+        from unittest.mock import patch
+
+        import hermes_cli.commands as cmd_mod
+
+        self._patch_plugin_commands(monkeypatch, {
+            "paperclip-dev": {
+                "handler": lambda _a: "ok",
+                "description": "Legacy",
+                "args_hint": "",
+                "plugin": "legacy-paperclip",
+            }
+        })
+        _real_resolve = cmd_mod.resolve_command
+
+        def _hide_builtin_paperclip(name):
+            if str(name or "").lower().lstrip("/") == "paperclip":
+                return None
+            return _real_resolve(name)
+
+        with patch("agent.skill_commands.get_skill_commands", return_value={}):
+            with patch.object(cmd_mod, "resolve_command", _hide_builtin_paperclip):
+                names = {name for name, _desc in telegram_bot_commands()}
+        assert "paperclip_dev" in names
 
     def test_is_gateway_known_command_recognizes_plugin_commands(self, monkeypatch):
         """is_gateway_known_command() must return True for plugin commands."""

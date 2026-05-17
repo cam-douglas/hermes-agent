@@ -240,38 +240,102 @@ def _build_skill_message(
 
 def _is_paperclip_slash_family(cmd_name: str) -> bool:
     """Whether this slug belongs to the Paperclip multi-skill bundle."""
-    return cmd_name == "paperclip" or cmd_name.startswith("paperclip-")
+    if cmd_name == "paperclip":
+        return True
+    if cmd_name.startswith("paperclip-"):
+        return True
+    # Compound tokens when frontmatter used camelCase / no separator, e.g.
+    # ``name: paperclipDev`` → ``paperclipdev`` (not ``paperclip-dev``).
+    return len(cmd_name) > len("paperclip") and cmd_name.startswith("paperclip")
+
+
+def _strip_extra_paperclip_slash_keys() -> None:
+    """Drop stray ``/paperclip-*`` / compound slugs once ``/paperclip`` exists.
+
+    When the gateway owns ``/paperclip``, skills register under a different slash
+    — this function is a no-op (no ``/paperclip`` skill key).
+
+    ``slash_aliases`` or unusual normalizations can register a second key that
+    still points at the Paperclip bundle.  Operators should see one entry.
+    """
+    global _skill_commands
+    if "/paperclip" not in _skill_commands:
+        return
+    for key in list(_skill_commands):
+        if key == "/paperclip":
+            continue
+        bare = key.lstrip("/")
+        if _is_paperclip_slash_family(bare):
+            del _skill_commands[key]
+
+
+def should_suppress_paperclip_family_plugin(plugin_slash_name: str) -> bool:
+    """Return True when a plugin slash duplicates the Paperclip slash entrypoint.
+
+    Applies when the gateway owns ``/paperclip`` **or** a unified ``/paperclip``
+    skill exists, so ``paperclip-*`` plugins do not duplicate menus.
+    """
+    if not plugin_slash_name or not isinstance(plugin_slash_name, str):
+        return False
+    gateway_pc = False
+    try:
+        from hermes_cli.commands import resolve_command
+
+        gateway_pc = resolve_command("paperclip") is not None
+    except Exception:
+        pass
+    if not gateway_pc:
+        try:
+            cmds = get_skill_commands()
+        except Exception:
+            cmds = {}
+        if "/paperclip" not in cmds:
+            return False
+    bare = plugin_slash_name.strip().lower().replace("_", "-")
+    return _is_paperclip_slash_family(bare)
 
 
 def _register_unified_paperclip_slash(
     candidates: list[tuple[str, Dict[str, Any]]],
 ) -> None:
-    """Register exactly one ``/paperclip`` for the Paperclip bundle.
+    """Register one Paperclip-bundle skill slash when no builtin `/paperclip` exists.
 
-    Many installs ship several skills (``paperclip-dev``, ``paperclip-distill``,
-    …) that each claim a ``paperclip-*`` slash.  Menus then show duplicates and
-    noisy variants.  We keep a single ``/paperclip`` that prefers the umbrella
-    skill (name and directory ``paperclip``) and otherwise picks a stable
-    fallback so operators still have one entrypoint.
+    When :func:`hermes_cli.commands.resolve_command` maps ``paperclip`` to the
+    gateway slash, **omit** Paperclip-bundle skills from the slash map entirely
+    so the TUI/catalog/completer only show the single builtin — not a second
+    ``/paperclip-*`` skill.  Operators still load bridge docs via the skills
+    browser and agent ``skills`` tooling.
     """
     global _skill_commands
     if not candidates:
         return
-    exact_slug = [e for cmd, e in candidates if cmd == "paperclip"]
-    pool: list[Dict[str, Any]] = exact_slug if exact_slug else [e for _, e in candidates]
+    try:
+        from hermes_cli.commands import resolve_command
 
-    def _score(entry: Dict[str, Any]) -> tuple:
+        if resolve_command("paperclip") is not None:
+            return
+    except Exception:
+        pass
+
+    pool_tuples: list[tuple[str, Dict[str, Any]]] = [
+        (cmd, e) for cmd, e in candidates if cmd == "paperclip"
+    ] or list(candidates)
+
+    def _score(pair: tuple[str, Dict[str, Any]]) -> tuple:
+        _cmd, entry = pair
         path = Path(entry["skill_md_path"])
         parent = path.parent.name.lower()
         sname = (entry.get("name") or "").strip().lower()
         return (
             0 if sname == "paperclip" else 1,
             0 if parent == "paperclip" else 1,
+            0 if _cmd == "paperclip" else 1,
             len(path.parts),
             str(path),
         )
 
-    _skill_commands["/paperclip"] = min(pool, key=_score)
+    _win_cmd, win_entry = min(pool_tuples, key=_score)
+    _skill_commands["/paperclip"] = win_entry
 
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
@@ -362,6 +426,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                 except Exception:
                     continue
         _register_unified_paperclip_slash(paperclip_slash_candidates)
+        _strip_extra_paperclip_slash_keys()
     except Exception:
         pass
     return _skill_commands
@@ -471,12 +536,17 @@ def build_skill_invocation_message(
     user_instruction: str = "",
     task_id: str | None = None,
     runtime_note: str = "",
+    *,
+    autoresearch_engagement_scope: str | None = None,
 ) -> Optional[str]:
     """Build the user message content for a skill slash command invocation.
 
     Args:
         cmd_key: The command key including leading slash (e.g., "/gif-search").
         user_instruction: Optional text the user typed after the command.
+        autoresearch_engagement_scope: For ``/autoresearch`` only: Hermes ``session_id``
+            (or other per-conversation scope) written to ``autoresearch_engaged_scope``.
+            When unset, falls back to ``task_id`` (CLI passes ``session_id`` there).
 
     Returns:
         The formatted message string, or None if the skill wasn't found.
@@ -500,23 +570,46 @@ def build_skill_invocation_message(
         pass  # Non-critical — skill invocation proceeds regardless
 
     if skill_name == "autoresearch":
-        activation_note = (
-            '[CRITICAL — /autoresearch] The user started the **autoresearch** workflow. '
-            '**Before** running `terminal`, cloning repos, or `train.py`: '
-            '(1) Ask the user to **paste the full `program.md` body** (or give a path to read). '
-            '(2) Ask for **outer wall-clock minutes** for the Hermes tool loop. '
-            'Do not skip these prompts or invent durations. '
-            'Canonical layout: training code under `$HERMES_HOME/skills/software-development/'
-            'repo-autoresearch-cpu/checkout/` (Hermes **skills** tree — **not** `skills-repos`). '
-            'Clone https://github.com/cam-douglas/autoresearch-cpu.git into `checkout/` if missing. '
-            'Prefer `python3` / a project venv when `uv` is unavailable. '
-            'When the Hermes outer wall-clock arms, the runtime prints **exact** colored '
-            'one-liners for `prepare.py` / `train.py` (and mirrors them in '
-            '`$HERMES_HOME/autoresearch_wallclock_state.json`). **Tell the user to copy '
-            'the green train line** into a second terminal — do **not** use `uv run` in '
-            'background/terminal unless `command -v uv` succeeds on that host. '
-            'After answers, write `checkout/program.md` and align `HERMES_AUTORESEARCH_OUTER_MINUTES`.]'
+        try:
+            from tools.autoresearch_runtime import autoresearch_outer_runtime_enabled
+        except Exception:
+            def autoresearch_outer_runtime_enabled() -> bool:  # type: ignore[misc]
+                return True
+
+        _engage = (autoresearch_engagement_scope or "").strip() or (
+            (task_id or "").strip()
         )
+        if autoresearch_outer_runtime_enabled() and _engage:
+            try:
+                from tools.autoresearch_runtime import set_autoresearch_engaged_scope
+
+                set_autoresearch_engaged_scope(_engage)
+            except Exception:
+                pass
+
+        if autoresearch_outer_runtime_enabled():
+            activation_note = (
+                '[CRITICAL — /autoresearch] The user started the **autoresearch** workflow. '
+                '**Before** running `terminal`, cloning repos, or `train.py`: '
+                '(1) Ask the user to **paste the full `program.md` body** (or give a path to read). '
+                '(2) Ask for **outer wall-clock minutes** for the Hermes tool loop. '
+                'Do not skip these prompts or invent durations. '
+                'Canonical layout: training code under `$HERMES_HOME/skills/software-development/'
+                'repo-autoresearch-cpu/checkout/` (Hermes **skills** tree — **not** `skills-repos`). '
+                'Clone https://github.com/cam-douglas/autoresearch-cpu.git into `checkout/` if missing. '
+                'Prefer `python3` / a project venv when `uv` is unavailable. '
+                'When the Hermes outer wall-clock arms, the runtime prints **exact** colored '
+                'one-liners for `prepare.py` / `train.py` (and mirrors them in '
+                '`$HERMES_HOME/autoresearch_wallclock_state.json`). **Tell the user to copy '
+                'the green train line** into a second terminal — do **not** use `uv run` in '
+                'background/terminal unless `command -v uv` succeeds on that host. '
+                'After answers, write `checkout/program.md` and align `HERMES_AUTORESEARCH_OUTER_MINUTES`.]'
+            )
+        else:
+            activation_note = (
+                f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want '
+                "you to follow its instructions. The full skill content is loaded below.]"
+            )
     else:
         activation_note = (
             f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want '

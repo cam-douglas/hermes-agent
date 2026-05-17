@@ -1314,6 +1314,20 @@ def _get_usage(agent) -> dict:
             usage["cost_usd"] = float(cost.amount_usd)
     except Exception:
         pass
+    try:
+        from hermes_cli.config import load_config
+
+        _lc = load_config()
+        _sg = (_lc.get("spend_governance") or {}) if isinstance(_lc, dict) else {}
+        if _sg.get("enabled") and _sg.get("dedicated_spend_bar", True):
+            from agent.spend_governance import read_spend_totals
+
+            _tot = read_spend_totals(_sg, session_id=getattr(agent, "session_id", None))
+            usage["spend_session_usd"] = _tot["session"]
+            usage["spend_day_usd"] = _tot["day"]
+            usage["spend_month_usd"] = _tot["month"]
+    except Exception:
+        pass
     return usage
 
 
@@ -4309,6 +4323,10 @@ def _(rid, params: dict) -> dict:
                 cat_order.append(cat)
             cat_map[cat].append([name, desc])
 
+        # Slash keys already taken by COMMAND_REGISTRY + extras (avoid duplicate
+        # catalog rows when a quick_command echoes a built-in like /paperclip).
+        occupied_slash = {pair[0].lower() for pair in all_pairs if pair}
+
         warning = ""
         try:
             qcmds = _load_cfg().get("quick_commands", {}) or {}
@@ -4321,6 +4339,9 @@ def _(rid, params: dict) -> dict:
                     if not isinstance(qc, dict):
                         continue
                     key = f"/{qname}"
+                    if key.lower() in occupied_slash:
+                        continue
+                    occupied_slash.add(key.lower())
                     canon[key.lower()] = key
                     qtype = qc.get("type", "")
                     if qtype == "exec":
@@ -4342,8 +4363,11 @@ def _(rid, params: dict) -> dict:
             from agent.skill_commands import scan_skill_commands
 
             for k, info in sorted(scan_skill_commands().items()):
+                if k.lower() in occupied_slash:
+                    continue
                 d = str(info.get("description", "Skill"))
                 all_pairs.append([k, d[:120] + ("…" if len(d) > 120 else "")])
+                occupied_slash.add(k.lower())
                 skill_count += 1
         except Exception as e:
             warning = f"skill discovery unavailable: {e}"
@@ -4477,6 +4501,23 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"type": "alias", "target": qc.get("target", "")})
 
     try:
+        from hermes_cli.commands import resolve_command
+
+        _pc_def = resolve_command(name)
+        if _pc_def and _pc_def.name == "paperclip":
+            from tools.paperclip_slash import paperclip_slash_reply
+
+            return _ok(
+                rid,
+                {
+                    "type": "exec",
+                    "output": paperclip_slash_reply(open_browser=False),
+                },
+            )
+    except Exception:
+        pass
+
+    try:
         from hermes_cli.plugins import (
             get_plugin_command_handler,
             resolve_plugin_command_result,
@@ -4498,8 +4539,12 @@ def _(rid, params: dict) -> dict:
         cmds = scan_skill_commands()
         key = f"/{name}"
         if key in cmds:
+            _sid = (session.get("session_id") or "").strip() if session else ""
             msg = build_skill_invocation_message(
-                key, arg, task_id=session.get("session_key", "") if session else ""
+                key,
+                arg,
+                task_id=session.get("session_key", "") if session else "",
+                autoresearch_engagement_scope=_sid or None,
             )
             if msg:
                 return _ok(
