@@ -5554,6 +5554,8 @@ class GatewayRunner:
                     return await self._handle_help_command(event)
                 if _cmd_def_inner.name == "commands":
                     return await self._handle_commands_command(event)
+                if _cmd_def_inner.name == "paperclip":
+                    return await self._handle_paperclip_command(event)
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
                 if _cmd_def_inner.name == "update":
@@ -5768,7 +5770,10 @@ class GatewayRunner:
 
         if canonical == "commands":
             return await self._handle_commands_command(event)
-        
+
+        if canonical == "paperclip":
+            return await self._handle_paperclip_command(event)
+
         if canonical == "profile":
             return await self._handle_profile_command(event)
 
@@ -8027,6 +8032,16 @@ class GatewayRunner:
             "\n".join(lines),
             getattr(getattr(event, "source", None), "platform", None),
         )
+
+    async def _handle_paperclip_command(self, event: MessageEvent) -> str:
+        """Handle /paperclip — open the control plane in a browser when on LOCAL."""
+        from gateway.config import Platform
+        from tools.paperclip_slash import paperclip_slash_reply
+
+        platform = getattr(getattr(event, "source", None), "platform", None)
+        try_open = platform == Platform.LOCAL
+        text = paperclip_slash_reply(open_browser=try_open)
+        return _telegramize_command_mentions(text, platform)
 
     async def _handle_commands_command(self, event: MessageEvent) -> str:
         """Handle /commands [page] - paginated list of all commands and skills."""

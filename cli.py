@@ -6760,6 +6760,10 @@ class HermesCLI:
             return False
         elif canonical == "help":
             self.show_help()
+        elif canonical == "paperclip":
+            from tools.paperclip_slash import paperclip_slash_reply
+
+            self._console_print(paperclip_slash_reply(open_browser=True))
         elif canonical == "profile":
             self._handle_profile_command()
         elif canonical == "tools":
