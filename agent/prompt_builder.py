@@ -147,6 +147,17 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "before answering. Docs: https://hermes-agent.nousresearch.com/docs"
 )
 
+TERMINAL_OUTPUT_GUIDANCE = (
+    "## Terminal / chat formatting (user sees plain text)\n"
+    "Structure longer replies so sections are visually distinct: use short headings "
+    "(e.g. markdown `##`), horizontal rules (`---`), or a blank line between **Reasoning / plan**, "
+    "**Actions taken** (tools, edits, commands), **Result**, and **Next for you**.\n"
+    "Prefer concise answers; add detail only when the task is narrow, risky, or requires precision.\n"
+    "Always end substantive replies with a **Next for you** (or **Your call**) block when anything "
+    "is optional, ambiguous, or requires a user decision — use a bordered or bullet list so it "
+    "obviously differs from the rest of the message."
+)
+
 MEMORY_GUIDANCE = (
     "You have persistent memory across sessions. Save durable facts using the memory "
     "tool: user preferences, environment details, tool quirks, and stable conventions. "
