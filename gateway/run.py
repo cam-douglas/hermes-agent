@@ -4821,7 +4821,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # elsewhere), which would otherwise trigger
         # ``RuntimeError: dictionary changed size during iteration`` —
         # observed in a user report during gateway shutdown.
+        op = self.config.resolved_gateway_operator_notify_platform()
         for platform, adapter in list(self.adapters.items()):
+            if op is not None and platform != op:
+                continue
             home = self.config.get_home_channel(platform)
             if not home or not home.chat_id:
                 continue
@@ -8033,6 +8036,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return await self._handle_help_command(event)
                 if _cmd_def_inner.name == "commands":
                     return await self._handle_commands_command(event)
+                if _cmd_def_inner.name == "paperclip":
+                    return await self._handle_paperclip_command(event)
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
                 if _cmd_def_inner.name == "update":
@@ -8293,7 +8298,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "commands":
             return await self._handle_commands_command(event)
-        
+
+        if canonical == "paperclip":
+            return await self._handle_paperclip_command(event)
+
         if canonical == "profile":
             return await self._handle_profile_command(event)
 
@@ -10018,6 +10026,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
+                    session_id=agent_result.get("session_id"),
                 )
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
@@ -12834,6 +12843,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return True
 
+    def _resolve_operator_status_delivery(
+        self,
+        *,
+        source: SessionSource,
+        progress_thread_id: Optional[str],
+        event_message_id: Optional[str],
+    ) -> tuple[Optional[Any], Optional[str], Optional[Dict[str, Any]]]:
+        """Adapter/chat/metadata for mid-turn *operational* pings (not main replies).
+
+        When ``gateway_operator_notify_platform`` is set, route "Still working",
+        context-pressure status callbacks, and inactivity warnings to that
+        platform's home channel so other connected platforms stay quiet.
+        """
+        op = self.config.resolved_gateway_operator_notify_platform()
+        if op is not None:
+            adapter = self.adapters.get(op)
+            home = self.config.get_home_channel(op)
+            if adapter and home and home.chat_id:
+                chat_id = str(home.chat_id)
+                if op == Platform.FEISHU and home.thread_id and event_message_id:
+                    meta: Optional[Dict[str, Any]] = {
+                        "thread_id": home.thread_id,
+                        "reply_to_message_id": event_message_id,
+                    }
+                elif home.thread_id:
+                    meta = {"thread_id": home.thread_id}
+                else:
+                    meta = None
+                return adapter, chat_id, meta
+            logger.debug(
+                "gateway_operator_notify_platform=%s missing adapter/home — "
+                "falling back to conversation source for operational pings",
+                op.value,
+            )
+
+        adapter = self.adapters.get(source.platform)
+        if not adapter or not source.chat_id:
+            return None, None, None
+        chat_id = str(source.chat_id)
+        if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
+            meta = {
+                "thread_id": progress_thread_id,
+                "reply_to_message_id": event_message_id,
+            }
+        else:
+            meta = {"thread_id": progress_thread_id} if progress_thread_id else None
+        return adapter, chat_id, meta
+
     async def _send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
         """Notify the chat that initiated /restart that the gateway is back."""
         notify_path = _hermes_home / ".restart_notify.json"
@@ -12921,7 +12978,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         skipped = skip_targets or set()
         message = "♻️ Gateway online — Hermes is back and ready."
 
+        op = self.config.resolved_gateway_operator_notify_platform()
         for platform, adapter in self.adapters.items():
+            if op is not None and platform != op:
+                continue
             home = self.config.get_home_channel(platform)
             if not home or not home.chat_id:
                 continue
@@ -16834,18 +16894,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if (not _warning_fired and _agent_warning is not None
                             and _idle_secs >= _agent_warning):
                         _warning_fired = True
-                        _warn_adapter = self.adapters.get(source.platform)
-                        if _warn_adapter:
+                        if _ping_adapter and _ping_chat_id:
                             _elapsed_warn = int(_agent_warning // 60) or 1
                             _remaining_mins = int((_agent_timeout - _agent_warning) // 60) or 1
                             try:
-                                await _warn_adapter.send(
-                                    source.chat_id,
+                                await _ping_adapter.send(
+                                    _ping_chat_id,
                                     f"⚠️ No activity for {_elapsed_warn} min. "
                                     f"If the agent does not respond soon, it will "
                                     f"be timed out in {_remaining_mins} min. "
                                     f"You can continue waiting or use /reset.",
-                                    metadata=_status_thread_metadata,
+                                    metadata=_ping_meta,
                                 )
                             except Exception as _warn_err:
                                 logger.debug("Inactivity warning send error: %s", _warn_err)

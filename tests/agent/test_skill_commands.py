@@ -58,6 +58,23 @@ class TestScanSkillCommands:
         assert "/my-skill" in result
         assert result["/my-skill"]["name"] == "my-skill"
 
+    def test_metadata_slash_aliases(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "primary-name",
+                frontmatter_extra=(
+                    "metadata:\n"
+                    "  hermes:\n"
+                    "    slash_aliases: [legacy-slug, alt-slug]\n"
+                ),
+            )
+            result = scan_skill_commands()
+        assert "/primary-name" in result
+        assert "/legacy-slug" in result
+        assert "/alt-slug" in result
+        assert result["/alt-slug"] is result["/primary-name"]
+
     def test_empty_dir(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             result = scan_skill_commands()
@@ -378,6 +395,90 @@ class TestScanSkillCommands:
         assert any("/" in k[1:] for k in result) is False  # no unescaped /
 
 
+class TestPaperclipSlashCollapse:
+    """Paperclip ships multiple skills; only ``/paperclip`` should register."""
+
+    @pytest.fixture(autouse=True)
+    def _pretend_no_builtin_paperclip_slash(self, monkeypatch):
+        import hermes_cli.commands as cmd_mod
+
+        _orig = cmd_mod.resolve_command
+
+        def _wrapped(name):
+            if str(name or "").lower().lstrip("/") == "paperclip":
+                return None
+            return _orig(name)
+
+        monkeypatch.setattr(cmd_mod, "resolve_command", _wrapped)
+
+    def test_paperclip_bundle_collapses_to_single_slash(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "paperclip-dev", body="Dev skill.")
+            _make_skill(tmp_path, "paperclip-distill", body="Distill skill.")
+            umbrella = _make_skill(tmp_path, "paperclip", body="Umbrella.")
+            result = scan_skill_commands()
+        assert set(result.keys()) == {"/paperclip"}
+        assert result["/paperclip"]["skill_dir"] == str(umbrella)
+
+    def test_paperclip_fallback_without_exact_slug_still_one_command(
+        self, tmp_path,
+    ):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "paperclip-dev", body="A.")
+            _make_skill(tmp_path, "paperclip-zed", body="B.")
+            result = scan_skill_commands()
+        assert set(result.keys()) == {"/paperclip"}
+        assert result["/paperclip"]["name"] in ("paperclip-dev", "paperclip-zed")
+
+    def test_paperclip_compound_slug_collapses_with_hyphen_variants(
+        self, tmp_path,
+    ):
+        """CamelCase / fused slugs must not leave a second ``/paperclip*`` key."""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "paperclipDev", body="Dev.")
+            umbrella = _make_skill(tmp_path, "paperclip", body="Root.")
+            result = scan_skill_commands()
+        assert set(result.keys()) == {"/paperclip"}
+        assert result["/paperclip"]["skill_dir"] == str(umbrella)
+
+    def test_paperclip_slash_alias_stripped_when_unified_exists(
+        self, tmp_path,
+    ):
+        """``slash_aliases`` must not surface a second Paperclip menu entry."""
+        alias_fm = (
+            "metadata:\n"
+            "  hermes:\n"
+            "    slash_aliases: [paperclip-distill]\n"
+        )
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "unrelated-docs",
+                frontmatter_extra=alias_fm,
+                body="Docs.",
+            )
+            _make_skill(tmp_path, "paperclip-distill", body="Distill.")
+            umbrella = _make_skill(tmp_path, "paperclip", body="Umbrella.")
+            result = scan_skill_commands()
+        assert "/paperclip-distill" not in result
+        assert set(k for k in result if k.startswith("/paperclip")) == {"/paperclip"}
+        assert result["/paperclip"]["skill_dir"] == str(umbrella)
+
+
+class TestPaperclipSlashWithBuiltinGatewayCommand:
+    """When ``/paperclip`` is a gateway command, Paperclip skills omit slash keys."""
+
+    def test_bundle_does_not_register_second_slash(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "paperclip-dot-hermes-bridge", body="Bridge.")
+            result = scan_skill_commands()
+        assert "/paperclip" not in result
+        assert "/paperclip-dot-hermes-bridge" not in result
+        assert not any(
+            k.lstrip("/").startswith("paperclip") for k in result
+        )
+
+
 class TestResolveSkillCommandKey:
     """Telegram bot-command names disallow hyphens, so the menu registers
     skills with hyphens swapped for underscores. When Telegram autocomplete
@@ -485,6 +586,56 @@ Generate some audio.
         assert msg is not None
         assert "test-skill" in msg
         assert "do stuff" in msg
+
+    def test_autoresearch_critical_preamble_primary_slash_only(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HERMES_AUTORESEARCH_DISABLED", raising=False)
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "autoresearch", body="Autoresearch body")
+            result = scan_skill_commands()
+            msg = build_skill_invocation_message("/autoresearch")
+        assert "/autoresearch" in result
+        assert "/arcpu" not in result
+        assert "/repo-autoresearch-cpu" not in result
+        assert msg is not None
+        assert "CRITICAL — /autoresearch" in msg
+        assert "program.md" in msg
+        assert "skills-repos" in msg  # explicit “do not use skills-repos” guidance
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            assert build_skill_invocation_message("/arcpu") is None
+
+    def test_autoresearch_generic_preamble_when_runtime_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_AUTORESEARCH_DISABLED", "1")
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "autoresearch", body="Autoresearch body")
+            scan_skill_commands()
+            msg = build_skill_invocation_message("/autoresearch", task_id="sess-1")
+        assert msg is not None
+        assert "CRITICAL — /autoresearch" not in msg
+        assert "IMPORTANT" in msg
+
+    def test_autoresearch_engagement_prefers_engagement_scope_kwarg(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("HERMES_AUTORESEARCH_DISABLED", raising=False)
+        captured: list[str] = []
+
+        def _capture(key: str) -> None:
+            captured.append(key)
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "autoresearch", body="body")
+            scan_skill_commands()
+            with patch(
+                "tools.autoresearch_runtime.set_autoresearch_engaged_scope",
+                side_effect=_capture,
+            ):
+                build_skill_invocation_message(
+                    "/autoresearch",
+                    "",
+                    task_id="channel-stable-key",
+                    autoresearch_engagement_scope="hermes-session-abc",
+                )
+        assert captured == ["hermes-session-abc"]
 
     def test_returns_none_for_unknown(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):

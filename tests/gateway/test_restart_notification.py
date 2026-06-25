@@ -7,10 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
-from gateway.config import HomeChannel, Platform
+from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import (
+    RestartTestAdapter,
     make_restart_runner,
     make_restart_source,
 )

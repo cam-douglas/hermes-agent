@@ -737,6 +737,32 @@ def write_profile_meta(
 # CRUD operations
 # ---------------------------------------------------------------------------
 
+def _read_ephemeral_marker(profile_dir: Path) -> tuple[bool, Optional[float]]:
+    marker = profile_dir / ".ephemeral_profile"
+    if not marker.is_file():
+        return False, None
+    ttl_hours: Optional[float] = None
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8") or "{}")
+        ttl_raw = data.get("ttl_hours")
+        if ttl_raw is not None:
+            ttl_hours = float(ttl_raw)
+    except Exception:
+        ttl_hours = None
+    return True, ttl_hours
+
+
+def _ephemeral_ttl_remaining(profile_dir: Path, ttl_hours: Optional[float]) -> Optional[float]:
+    if ttl_hours is None:
+        return None
+    marker = profile_dir / ".ephemeral_profile"
+    try:
+        age_h = (time.time() - marker.stat().st_mtime) / 3600
+        return max(0.0, float(ttl_hours) - age_h)
+    except Exception:
+        return None
+
+
 def list_profiles() -> List[ProfileInfo]:
     """Return info for all profiles, including the default."""
     profiles = []
@@ -876,6 +902,10 @@ def create_profile(
         a marker file so ``hermes update`` skips re-seeding this profile's
         skills. Mutually exclusive with ``clone_config``/``clone_all`` (those
         explicitly copy skills from the source).
+    ephemeral:
+        Mark the profile as temporary for handover v4 profile routing.
+    ttl_hours:
+        Optional TTL hint written to the ephemeral marker.
 
     Returns
     -------

@@ -16,6 +16,7 @@ from tools.mcp_oauth import (
     OAuthNonInteractiveError,
     build_oauth_auth,
     remove_oauth_tokens,
+    oauth_http_auth_feasible,
     _find_free_port,
     _can_open_browser,
     _is_interactive,

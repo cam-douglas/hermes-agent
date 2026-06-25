@@ -30,6 +30,7 @@ Configuration in config.yaml::
           scope: "read write"                   # default: server-provided
           redirect_port: 0                      # 0 = auto-pick free port
           client_name: "My Custom Client"       # default: "Hermes Agent"
+          open_browser: true                    # set false to print URL only (avoids duplicate tabs on macOS)
 """
 
 import asyncio
@@ -43,6 +44,7 @@ import stat
 import sys
 import threading
 import time
+import contextvars
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -51,6 +53,11 @@ from urllib.parse import parse_qs, urlparse
 from hermes_constants import secure_parent_dir
 
 logger = logging.getLogger(__name__)
+
+# One asyncio.Lock per running event loop so concurrent OAuth flows cannot bind
+# the same redirect port twice (Zapier/MCP may retry quickly after failed token
+# exchange). Tests and one-off asyncio.run() each get their own loop id.
+_oauth_callback_wait_locks: dict[int, asyncio.Lock] = {}
 
 # ---------------------------------------------------------------------------
 # Lazy imports -- MCP SDK with OAuth support is optional
@@ -160,6 +167,68 @@ def _can_open_browser() -> bool:
     if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
         return True
     return False
+
+
+def _sync_access_remaining_seconds_from_disk_payload(
+    data: dict, tokens_path: Path
+) -> float | None:
+    """Best-effort remaining access-token TTL from a persisted JSON payload."""
+    absolute_expiry = data.get("expires_at")
+    if absolute_expiry is not None:
+        try:
+            return float(absolute_expiry) - time.time()
+        except (TypeError, ValueError):
+            pass
+    expires_in = data.get("expires_in")
+    if expires_in is not None:
+        try:
+            file_mtime = tokens_path.stat().st_mtime
+            implied_expiry = file_mtime + int(expires_in)
+            return float(implied_expiry) - time.time()
+        except (OSError, TypeError, ValueError):
+            try:
+                return float(int(expires_in))
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def oauth_http_auth_feasible(server_name: str) -> bool:
+    """Return whether HTTP MCP OAuth can run without blocking on a missing browser flow.
+
+    If there are no tokens on disk, completing OAuth requires either a local browser
+    (or a workstation-like environment) or an explicit opt-in for headless tunneling.
+
+    Without this guard, ``discover_mcp_tools`` on a headless server with ``auth: oauth``
+    and missing/invalid tokens would open the interactive redirect + callback wait and
+    stall Hermes startup (Zapier, etc.).
+    """
+    if os.environ.get("HERMES_MCP_OAUTH_ALLOW_HEADLESS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return True
+    storage = HermesTokenStorage(server_name)
+    if storage.has_cached_tokens():
+        if _can_open_browser():
+            return True
+        # SSH / CI: token files from an old laptop login are not enough — only
+        # proceed if we likely won't need an interactive PKCE browser step.
+        if storage.oauth_may_work_without_interactive_browser():
+            return True
+        logger.warning(
+            "MCP server '%s': OAuth tokens on disk cannot be refreshed here "
+            "(SSH/headless, expired access, or missing metadata). Skipping OAuth "
+            "for this run — run `hermes mcp login %s` on a machine with a browser, "
+            "copy mcp-tokens into this profile, set HERMES_MCP_OAUTH_ALLOW_HEADLESS=1 "
+            "with a tunneled callback, or set mcp_servers.%s.enabled: false.",
+            server_name,
+            server_name,
+            server_name,
+        )
+        return False
+    return _can_open_browser()
 
 
 def _read_json(path: Path) -> dict | None:
@@ -347,10 +416,37 @@ class HermesTokenStorage:
         """Return True if we have tokens on disk (may be expired)."""
         return self._tokens_path().exists()
 
+    def oauth_may_work_without_interactive_browser(self) -> bool:
+        """Whether disk OAuth state can plausibly succeed without a local browser.
+
+        Used on SSH/headless hosts: a token *file* existing is not enough — stale
+        access tokens would otherwise drive PKCE browser auth and block ``hermes
+        chat`` startup (Zapier, etc.).  We only return True when the access token
+        still has comfortable TTL or we have refresh + persisted OAuth metadata
+        (token endpoint) so a silent refresh can run.
+        """
+        data = _read_json(self._tokens_path())
+        if not data or not isinstance(data, dict):
+            return False
+        remaining = _sync_access_remaining_seconds_from_disk_payload(
+            data, self._tokens_path()
+        )
+        if remaining is not None and remaining > 120:
+            return True
+        if not data.get("refresh_token"):
+            return False
+        return self.load_oauth_metadata() is not None
+
 
 # ---------------------------------------------------------------------------
 # Callback handler factory -- each invocation gets its own result dict
 # ---------------------------------------------------------------------------
+
+
+class _OAuthCallbackHTTPServer(HTTPServer):
+    """Callback listener with SO_REUSEADDR for rapid OAuth retries on macOS."""
+
+    allow_reuse_address = True
 
 
 def _make_callback_handler() -> tuple[type, dict]:
@@ -373,6 +469,12 @@ def _make_callback_handler() -> tuple[type, dict]:
             result["auth_code"] = code
             result["state"] = state
             result["error"] = error
+
+            logger.info(
+                "MCP OAuth /callback received (code_present=%s error=%s)",
+                bool(code),
+                error or "",
+            )
 
             body = (
                 "<html><body><h2>Authorization Successful</h2>"
@@ -448,7 +550,64 @@ async def _redirect_handler(authorization_url: str) -> None:
         print("  (Headless environment detected — open the URL manually.)\n", file=sys.stderr)
 
 
-async def _wait_for_callback() -> tuple[str, str | None]:
+def make_redirect_handler(oauth_cfg: dict) -> Any:
+    """Build a redirect handler that respects ``oauth.open_browser`` in config.
+
+    Call after :func:`_configure_callback_port` so ``oauth_cfg['_resolved_port']``
+    is set (used for user-facing callback guidance).
+    """
+    port = oauth_cfg.get("_resolved_port")
+
+    async def _handler(authorization_url: str) -> None:
+        await _emit_mcp_oauth_authorization_url(
+            authorization_url,
+            open_browser=_oauth_wants_auto_open_browser(oauth_cfg),
+            callback_port=port if isinstance(port, int) else None,
+        )
+
+    return _handler
+
+
+async def _redirect_handler(authorization_url: str) -> None:
+    """Legacy entrypoint — prefer :func:`make_redirect_handler` with server config."""
+    await _emit_mcp_oauth_authorization_url(
+        authorization_url,
+        open_browser=_oauth_wants_auto_open_browser({}),
+        callback_port=_oauth_port,
+    )
+
+
+def _make_paired_oauth_handlers(oauth_cfg: dict) -> tuple[Any, Any]:
+    """Redirect + callback handlers that share one asyncio lock per OAuth attempt.
+
+    Prevents a second MCP OAuth round (retry 401, parallel httpx, etc.) from
+    printing another authorize URL or binding ``redirect_port`` while the first
+    browser round-trip is still in progress.
+    """
+    port = oauth_cfg.get("_resolved_port")
+
+    async def _paired_redirect(authorization_url: str) -> None:
+        await _oauth_begin_interactive_flow()
+        try:
+            await _emit_mcp_oauth_authorization_url(
+                authorization_url,
+                open_browser=_oauth_wants_auto_open_browser(oauth_cfg),
+                callback_port=port if isinstance(port, int) else None,
+            )
+        except BaseException:
+            _oauth_release_interactive_flow_if_held()
+            raise
+
+    async def _paired_callback() -> tuple[str, str | None]:
+        try:
+            return await _oauth_callback_listen_impl()
+        finally:
+            _oauth_release_interactive_flow_if_held()
+
+    return _paired_redirect, _paired_callback
+
+
+async def _oauth_callback_listen_impl() -> tuple[str, str | None]:
     """Wait for the OAuth callback to arrive on the local callback server.
 
     Uses the module-level ``_oauth_port`` which is set by ``build_oauth_auth``
@@ -653,11 +812,12 @@ def _configure_callback_port(cfg: dict) -> int:
     flows); replacing it with a ContextVar is out of scope for this
     consolidation PR.
     """
-    global _oauth_port
+    global _oauth_port, _oauth_callback_timeout
     requested = int(cfg.get("redirect_port", 0))
     port = _find_free_port() if requested == 0 else requested
     cfg["_resolved_port"] = port
     _oauth_port = port  # legacy consumer: _wait_for_callback reads this
+    _oauth_callback_timeout = float(cfg.get("timeout", 300))
     return port
 
 
@@ -766,11 +926,12 @@ def build_oauth_auth(
     client_metadata = _build_client_metadata(cfg)
     _maybe_preregister_client(storage, cfg, client_metadata)
 
+    redirect_h, callback_h = _make_paired_oauth_handlers(cfg)
     return OAuthClientProvider(
         server_url=server_url,
         client_metadata=client_metadata,
         storage=storage,
-        redirect_handler=_redirect_handler,
-        callback_handler=_wait_for_callback,
+        redirect_handler=redirect_h,
+        callback_handler=callback_h,
         timeout=float(cfg.get("timeout", 300)),
     )

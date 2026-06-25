@@ -132,12 +132,33 @@ def _doctor_tool_availability_detail(toolset: str) -> str:
     return ""
 
 
+def _doctor_skip_toolset_ids() -> set[str]:
+    """Toolsets to omit from doctor \"unavailable\" warnings.
+
+    ``HERMES_DOCTOR_SKIP_TOOLSETS`` adds explicit skips (comma-separated).
+    ``HERMES_DOCTOR_STRICT_INTEGRATIONS=1`` disables the default skip list for
+    Spotify/Discord so missing OAuth/tokens surface again.
+
+    ``computer_use`` is always skipped on non-macOS (macOS-only toolset).
+    """
+    skip_ids = {s.strip() for s in os.environ.get("HERMES_DOCTOR_SKIP_TOOLSETS", "").split(",") if s.strip()}
+    if sys.platform != "darwin":
+        skip_ids.add("computer_use")
+    if os.environ.get("HERMES_DOCTOR_STRICT_INTEGRATIONS", "").strip() != "1":
+        skip_ids.update({"discord", "discord_admin", "spotify"})
+    return skip_ids
+
+
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
     """Adjust runtime-gated tool availability for doctor diagnostics."""
+    skip_ids = _doctor_skip_toolset_ids()
+
     updated_available = list(available)
     updated_unavailable = []
     for item in unavailable:
         name = item.get("name")
+        if name in skip_ids:
+            continue
         if _is_kanban_worker_env_gate(item):
             if "kanban" not in updated_available:
                 updated_available.append("kanban")

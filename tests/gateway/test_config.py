@@ -290,6 +290,16 @@ class TestGatewayConfigRoundtrip:
         restored = GatewayConfig.from_dict({"always_log_local": "false"})
         assert restored.always_log_local is False
 
+    def test_gateway_operator_notify_platform_roundtrip(self):
+        cfg = GatewayConfig(gateway_operator_notify_platform=" whatsapp ")
+        restored = GatewayConfig.from_dict(cfg.to_dict())
+        assert restored.gateway_operator_notify_platform == "whatsapp"
+
+    def test_resolved_gateway_operator_notify_platform_invalid(self, caplog):
+        cfg = GatewayConfig(gateway_operator_notify_platform="not-a-platform")
+        assert cfg.resolved_gateway_operator_notify_platform() is None
+        assert any("Invalid gateway_operator_notify_platform" in r.message for r in caplog.records)
+
     def test_get_notice_delivery_defaults_to_public(self):
         config = GatewayConfig(
             platforms={Platform.SLACK: PlatformConfig(enabled=True, token="***")}

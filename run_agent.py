@@ -344,6 +344,9 @@ class AIAgent:
         "have been dropped to keep the conversation alive. See issue #15236.]"
     )
 
+    # Stop memory-family tool retry spirals (bad replace/remove args, provider flakes).
+    _MEMORY_TOOL_ERROR_BREAKER_THRESHOLD = 4
+
     @property
     def base_url(self) -> str:
         return self._base_url
@@ -1035,6 +1038,72 @@ class AIAgent:
         if len(detail) > 220:
             detail = detail[:217].rstrip() + "..."
         self._emit_warning(f"⚠ Auxiliary {task} failed: {detail}")
+
+    def _call_adaptive_router(self, messages: List[Dict[str, str]], model: str, timeout: float) -> str:
+        """Call the OpenRouter router model and return raw text."""
+        from agent.auxiliary_client import resolve_provider_client
+
+        client, resolved_model = resolve_provider_client(
+            "openrouter",
+            model=model,
+            raw_codex=False,
+        )
+        if client is None:
+            raise RuntimeError("openrouter_router_client_unavailable")
+        response = client.chat.completions.create(
+            model=resolved_model or model,
+            messages=messages,
+            temperature=0,
+            timeout=timeout,
+        )
+        return response.choices[0].message.content or ""
+
+    def _maybe_apply_adaptive_routing(self, user_message: str) -> None:
+        """Resolve and apply a per-turn model route when enabled."""
+        cfg = self._adaptive_routing_cfg
+        if not cfg.get("enabled"):
+            return
+        decision = resolve_adaptive_route(
+            cfg,
+            current_model=self.model,
+            user_message=user_message,
+            call_router=self._call_adaptive_router,
+        )
+        self._last_routing_decision = decision
+        if cfg.get("observability_channel", "footer") != "none":
+            self._emit_structured_status("routing", routing_status_payload(decision))
+
+        if decision.tier == "consultant":
+            self._emit_structured_status("escalation", {
+                "phase": "approved" if decision.approval else "denied",
+                "target_model": decision.target_model,
+                "approved": bool(decision.approval),
+                "reason_code": decision.reason_code,
+                "trace_id": self.session_id,
+            })
+        if decision.target_model and decision.target_model != self.model:
+            self.model = decision.target_model
+
+    def _emit_profile_state(self) -> None:
+        cfg = self._profile_routing_cfg
+        if not cfg.get("enabled"):
+            return
+        marker_name = str(cfg.get("ephemeral_mark_file") or ".ephemeral_profile")
+        marker = get_hermes_home() / marker_name
+        ttl = cfg.get("ephemeral_ttl_hours")
+        payload: Dict[str, Any] = {
+            "scope": "profile",
+            "name": get_hermes_home().name,
+            "ephemeral": marker.exists(),
+            "ttl_hours_remaining": None,
+        }
+        try:
+            if marker.exists() and ttl is not None:
+                age_h = (time.time() - marker.stat().st_mtime) / 3600
+                payload["ttl_hours_remaining"] = max(0, float(ttl) - age_h)
+        except Exception:
+            pass
+        self._emit_structured_status("profile", payload)
 
     def _current_main_runtime(self) -> Dict[str, str]:
         """Return the live main runtime for session-scoped auxiliary routing."""

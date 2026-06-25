@@ -543,6 +543,15 @@ class GatewayConfig:
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
+    # When set (e.g. ``whatsapp``), gateway operational pings are centralized:
+    # lifecycle home messages ("Gateway online" / shutdown), /restart comeback
+    # notices (redirected to this platform's home channel), and mid-turn status
+    # ("Still working...", context-pressure status) go only here — not to every
+    # connected platform's home channel nor the active Telegram/Slack thread.
+    # ``None`` preserves legacy behavior.  Honors ``gateway_restart_notification``
+    # on the target platform.
+    gateway_operator_notify_platform: Optional[str] = None
+
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
@@ -562,6 +571,21 @@ class GatewayConfig:
             if self._is_platform_connected(platform, config):
                 connected.append(platform)
         return connected
+
+    def resolved_gateway_operator_notify_platform(self) -> Optional[Platform]:
+        """Parse ``gateway_operator_notify_platform`` into a :class:`Platform` if valid."""
+        raw = (self.gateway_operator_notify_platform or "").strip()
+        if not raw:
+            return None
+        try:
+            return Platform(raw.lower())
+        except ValueError:
+            logger.warning(
+                "Invalid gateway_operator_notify_platform=%r — ignoring; "
+                "use a platform id such as whatsapp, telegram, slack",
+                raw,
+            )
+            return None
 
     def _is_platform_connected(self, platform: Platform, config: PlatformConfig) -> bool:
         """Check whether a single platform is sufficiently configured."""
@@ -657,6 +681,7 @@ class GatewayConfig:
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
+            "gateway_operator_notify_platform": self.gateway_operator_notify_platform,
         }
     
     @classmethod
@@ -726,6 +751,10 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
+        _op_notify = data.get("gateway_operator_notify_platform")
+        if _op_notify is not None:
+            _op_notify = str(_op_notify).strip() or None
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -746,6 +775,7 @@ class GatewayConfig:
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
+            gateway_operator_notify_platform=_op_notify,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:

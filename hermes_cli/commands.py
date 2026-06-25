@@ -55,6 +55,9 @@ class CommandDef:
     cli_only: bool = False             # only available in CLI
     gateway_only: bool = False         # only available in gateway/messaging
     gateway_config_gate: str | None = None  # config dotpath; when truthy, overrides cli_only for gateway
+    # When False, aliases still resolve (see COMMAND_LOOKUP) but are omitted from duplicate picker rows:
+    # CLI COMMANDS map, COMMANDS_BY_CATEGORY, and Slack native-slash second pass.
+    include_alias_slash_commands: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +223,13 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("commands", "Browse all commands and skills (paginated)", "Info",
                gateway_only=True, args_hint="[page]"),
     CommandDef("help", "Show available commands", "Info"),
+    CommandDef(
+        "paperclip",
+        "Open Paperclip in the browser (local) or show links to the hub / deployment",
+        "Info",
+        aliases=("pc",),
+        include_alias_slash_commands=False,
+    ),
     CommandDef("restart", "Gracefully restart the gateway after draining active runs", "Session",
                gateway_only=True),
     CommandDef("usage", "Show token usage and rate limits for the current session", "Info"),
@@ -285,8 +295,9 @@ COMMANDS: dict[str, str] = {}
 for _cmd in COMMAND_REGISTRY:
     if not _cmd.gateway_only:
         COMMANDS[f"/{_cmd.name}"] = _build_description(_cmd)
-        for _alias in _cmd.aliases:
-            COMMANDS[f"/{_alias}"] = f"{_cmd.description} (alias for /{_cmd.name})"
+        if _cmd.include_alias_slash_commands:
+            for _alias in _cmd.aliases:
+                COMMANDS[f"/{_alias}"] = f"{_cmd.description} (alias for /{_cmd.name})"
 
 # Backwards-compatible categorized dict
 COMMANDS_BY_CATEGORY: dict[str, dict[str, str]] = {}
@@ -294,8 +305,9 @@ for _cmd in COMMAND_REGISTRY:
     if not _cmd.gateway_only:
         _cat = COMMANDS_BY_CATEGORY.setdefault(_cmd.category, {})
         _cat[f"/{_cmd.name}"] = COMMANDS[f"/{_cmd.name}"]
-        for _alias in _cmd.aliases:
-            _cat[f"/{_alias}"] = COMMANDS[f"/{_alias}"]
+        if _cmd.include_alias_slash_commands:
+            for _alias in _cmd.aliases:
+                _cat[f"/{_alias}"] = COMMANDS[f"/{_alias}"]
 
 
 # Subcommands lookup: "/cmd" -> ["sub1", "sub2", ...]
@@ -366,6 +378,7 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
         "deny",
         "help",
         "new",
+        "paperclip",
         "profile",
         "queue",
         "restart",
@@ -461,6 +474,8 @@ def gateway_help_lines() -> list[str]:
         args = f" {cmd.args_hint}" if cmd.args_hint else ""
         alias_parts: list[str] = []
         for a in cmd.aliases:
+            if not cmd.include_alias_slash_commands:
+                continue
             # Skip internal aliases like reload_mcp (underscore variant)
             if a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name:
                 continue
@@ -530,6 +545,13 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     for name, description, args_hint in _iter_plugin_command_entries():
         if _requires_argument(args_hint):
             continue
+        try:
+            from agent.skill_commands import should_suppress_paperclip_family_plugin
+
+            if should_suppress_paperclip_family_plugin(name):
+                continue
+        except Exception:
+            pass
         tg_name = _sanitize_telegram_name(name)
         if tg_name:
             result.append((tg_name, description))
@@ -802,6 +824,13 @@ def _collect_gateway_skill_entries(
         from hermes_cli.plugins import get_plugin_commands
         plugin_cmds = get_plugin_commands()
         for cmd_name in sorted(plugin_cmds):
+            try:
+                from agent.skill_commands import should_suppress_paperclip_family_plugin
+
+                if should_suppress_paperclip_family_plugin(cmd_name):
+                    continue
+            except Exception:
+                pass
             name = sanitize_name(cmd_name) if sanitize_name else cmd_name
             if not name:
                 continue
@@ -1177,8 +1206,9 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     matching Discord's and Telegram's model where every command is a
     first-class slash and not a ``/hermes <verb>`` subcommand.
 
-    Both canonical names and aliases are included so users can type any
-    documented form (e.g. ``/background``, ``/bg``, and ``/btw`` all work).
+    Canonical names are always included; aliases are included unless a
+    command sets ``include_alias_slash_commands=False`` (duplicate menu rows
+    only — aliases still resolve and work via ``/hermes <alias>``).
     Plugin-registered slash commands are included too.
 
     Commands whose sanitized name collides with a Slack built-in
@@ -1238,6 +1268,8 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
+        if not cmd.include_alias_slash_commands:
+            continue
         for alias in cmd.aliases:
             # Skip aliases that only differ from canonical by case/punctuation
             # normalization (already covered by _add dedup).
@@ -1245,24 +1277,43 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
 
     # Third pass: plugin commands.
     for name, description, args_hint in _iter_plugin_command_entries():
+        try:
+            from agent.skill_commands import should_suppress_paperclip_family_plugin
+
+            if should_suppress_paperclip_family_plugin(name):
+                continue
+        except Exception:
+            pass
         _add(name, description, args_hint or "")
 
     return entries
 
 
-def slack_app_manifest(request_url: str = "https://hermes-agent.local/slack/commands") -> dict[str, Any]:
+def slack_app_manifest(
+    request_url: str | None = None,
+) -> dict[str, Any]:
     """Generate a Slack app manifest with all gateway commands as slashes.
 
     ``request_url`` is required by Slack's manifest schema for every slash
     command, but in Socket Mode (which we use) Slack ignores it and routes
-    the command event through the WebSocket. A placeholder URL is fine.
+    the command event through the WebSocket. Use a stable public HTTPS URL so
+    Slack's validators are satisfied when saving the manifest.
 
-    The returned dict is the ``features.slash_commands`` portion only —
+    Override with env ``HERMES_SLACK_MANIFEST_SLASH_URL`` (or pass *request_url*).
+
+    The returned dict is the ``features.slash_commands`` portion only;
     callers compose it into a full manifest (or merge into an existing
     one). Keeping it narrow avoids coupling us to the rest of the manifest
     schema (display_information, oauth_config, settings, etc.) which users
     set up once in the Slack UI and rarely change.
     """
+
+    if request_url is None:
+        request_url = (
+            os.environ.get("HERMES_SLACK_MANIFEST_SLASH_URL", "").strip()
+            or "https://example.com/"
+        )
+
     slashes = []
     for name, desc, usage in slack_native_slashes():
         entry = {
@@ -1913,6 +1964,9 @@ class SlashCommandCompleter(Completer):
 
         word = text[1:]
 
+        skill_cmds_map = self._iter_skill_commands()
+        skill_base_names = {cmd.lstrip("/").lower() for cmd in skill_cmds_map}
+
         for cmd, desc in COMMANDS.items():
             if not self._command_allowed(cmd):
                 continue
@@ -1950,10 +2004,17 @@ class SlashCommandCompleter(Completer):
                     display_meta=f"⚡ {short_desc}",
                 )
 
-        # Plugin-registered slash commands
+        # Plugin-registered slash commands (skip names already claimed by skills
+        # so Paperclip and similar bundles don't show twice — ⚡ vs 🔌 duplicates).
         try:
             from hermes_cli.plugins import get_plugin_commands
+            from agent.skill_commands import should_suppress_paperclip_family_plugin
+
             for cmd_name, cmd_info in get_plugin_commands().items():
+                if cmd_name.lower() in skill_base_names:
+                    continue
+                if should_suppress_paperclip_family_plugin(cmd_name):
+                    continue
                 if cmd_name.startswith(word):
                     desc = str(cmd_info.get("description", "Plugin command"))
                     short_desc = desc[:50] + ("..." if len(desc) > 50 else "")

@@ -10519,6 +10519,8 @@ def cmd_profile(args):
         clone_all = getattr(args, "clone_all", False)
         no_alias = getattr(args, "no_alias", False)
         no_skills = getattr(args, "no_skills", False)
+        ephemeral = getattr(args, "ephemeral", False)
+        ttl_hours = getattr(args, "ttl_hours", None)
 
         try:
             clone_from = getattr(args, "clone_from", None)
