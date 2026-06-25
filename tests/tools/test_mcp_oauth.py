@@ -4,25 +4,32 @@ import json
 import os
 import stat
 import sys
-import time
 from io import BytesIO
-from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 
 import pytest
+
+import asyncio
 
 from tools.mcp_oauth import (
     HermesTokenStorage,
     OAuthNonInteractiveError,
     build_oauth_auth,
     remove_oauth_tokens,
-    oauth_http_auth_feasible,
     _find_free_port,
     _can_open_browser,
     _is_interactive,
     _wait_for_callback,
     _make_callback_handler,
+    _redirect_handler,
+    _paste_callback_reader,
 )
+
+
+def _set_interactive_stdin(monkeypatch, *, is_tty: bool = True) -> None:
+    mock_stdin = MagicMock()
+    mock_stdin.isatty.return_value = is_tty
+    monkeypatch.setattr("tools.mcp_oauth.sys.stdin", mock_stdin)
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +170,7 @@ class TestBuildOAuthAuth:
             pytest.skip("MCP SDK auth not available")
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
         auth = build_oauth_auth("test", "https://example.com/mcp")
         assert isinstance(auth, OAuthClientProvider)
 
@@ -179,6 +187,7 @@ class TestBuildOAuthAuth:
             pytest.skip("MCP SDK auth not available")
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
         build_oauth_auth("slack", "https://slack.example.com/mcp", {
             "client_id": "my-app-id",
             "client_secret": "my-secret",
@@ -198,6 +207,7 @@ class TestBuildOAuthAuth:
             pytest.skip("MCP SDK auth not available")
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
         provider = build_oauth_auth("scoped", "https://example.com/mcp", {
             "scope": "read write admin",
         })
@@ -243,157 +253,62 @@ class TestUtilities:
         assert _can_open_browser() is True
 
 
-class TestOauthHttpAuthFeasible:
-    def test_false_without_tokens_headless_linux(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        monkeypatch.delenv("SSH_CLIENT", raising=False)
-        monkeypatch.delenv("SSH_TTY", raising=False)
-        monkeypatch.delenv("DISPLAY", raising=False)
-        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-        monkeypatch.setattr(os, "name", "posix")
-        monkeypatch.setattr(os, "uname", lambda: type("", (), {"sysname": "Linux"})())
-        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
-        assert oauth_http_auth_feasible("zapier") is False
+class TestRedirectHandlerSshHint:
+    """_redirect_handler must print an SSH tunnel hint on remote sessions."""
 
-    def test_false_with_cached_tokens_ssh_when_not_usable_headlessly(self, tmp_path, monkeypatch):
-        """Bare token file without TTL/refresh must not force browser OAuth over SSH."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_ssh_hint_shown_on_ssh_session(self, monkeypatch, capsys):
+        import tools.mcp_oauth as mco
+        monkeypatch.setattr(mco, "_oauth_port", 49200)
         monkeypatch.setenv("SSH_CLIENT", "1.2.3.4 1234 22")
-        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
-        d = tmp_path / "mcp-tokens"
-        d.mkdir()
-        (d / "zapier.json").write_text('{"access_token":"x","token_type":"Bearer"}')
-        assert oauth_http_auth_feasible("zapier") is False
+        monkeypatch.delenv("SSH_TTY", raising=False)
+        monkeypatch.setattr(mco, "_can_open_browser", lambda: False)
 
-    def test_true_with_cached_tokens_ssh_when_access_not_expired(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._run(_redirect_handler("https://example.com/auth?foo=bar"))
+
+        err = capsys.readouterr().err
+        assert "49200" in err
+        assert "ssh -N -L" in err
+        assert "Remote session detected" in err
+
+    def test_ssh_hint_shown_via_ssh_tty(self, monkeypatch, capsys):
+        import tools.mcp_oauth as mco
+        monkeypatch.setattr(mco, "_oauth_port", 49201)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        monkeypatch.setenv("SSH_TTY", "/dev/pts/1")
+        monkeypatch.setattr(mco, "_can_open_browser", lambda: False)
+
+        self._run(_redirect_handler("https://example.com/auth"))
+
+        err = capsys.readouterr().err
+        assert "49201" in err
+        assert "ssh -N -L" in err
+
+    def test_no_ssh_hint_on_local_session(self, monkeypatch, capsys):
+        import tools.mcp_oauth as mco
+        monkeypatch.setattr(mco, "_oauth_port", 49202)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        monkeypatch.delenv("SSH_TTY", raising=False)
+        monkeypatch.setattr(mco, "_can_open_browser", lambda: True)
+        monkeypatch.setattr("webbrowser.open", lambda url, **kw: True)
+
+        self._run(_redirect_handler("https://example.com/auth"))
+
+        err = capsys.readouterr().err
+        assert "ssh -N -L" not in err
+
+    def test_no_ssh_hint_when_port_not_set(self, monkeypatch, capsys):
+        import tools.mcp_oauth as mco
+        monkeypatch.setattr(mco, "_oauth_port", None)
         monkeypatch.setenv("SSH_CLIENT", "1.2.3.4 1234 22")
-        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
-        d = tmp_path / "mcp-tokens"
-        d.mkdir()
-        future = int(time.time()) + 3600
+        monkeypatch.setattr(mco, "_can_open_browser", lambda: False)
 
-        (d / "zapier.json").write_text(
-            json.dumps(
-                {"access_token": "x", "token_type": "Bearer", "expires_at": future}
-            )
-        )
-        assert oauth_http_auth_feasible("zapier") is True
+        self._run(_redirect_handler("https://example.com/auth"))
 
-    def test_true_with_cached_tokens_headless_linux_valid_access(self, tmp_path, monkeypatch):
-        """Non-SSH headless Linux with comfortable access TTL can still use tokens."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
-        monkeypatch.delenv("SSH_CLIENT", raising=False)
-        monkeypatch.delenv("SSH_TTY", raising=False)
-        monkeypatch.delenv("DISPLAY", raising=False)
-        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-        monkeypatch.setattr(os, "name", "posix")
-        monkeypatch.setattr(os, "uname", lambda: type("", (), {"sysname": "Linux"})())
-        d = tmp_path / "mcp-tokens"
-        d.mkdir()
-        future = int(time.time()) + 3600
-
-        (d / "zapier.json").write_text(
-            json.dumps(
-                {"access_token": "x", "token_type": "Bearer", "expires_at": future}
-            )
-        )
-        assert oauth_http_auth_feasible("zapier") is True
-
-    def test_true_when_allow_headless_env(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        monkeypatch.setenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", "1")
-        assert oauth_http_auth_feasible("zapier") is True
-
-
-# ---------------------------------------------------------------------------
-# OAuth redirect handler (browser auto-open)
-# ---------------------------------------------------------------------------
-
-class TestRedirectHandlerNoBrowser:
-    """HERMES_MCP_OAUTH_NO_BROWSER must skip webbrowser.open (macOS ignores BROWSER=)."""
-
-    @pytest.fixture
-    def graphical_posix(self, monkeypatch):
-        monkeypatch.delenv("SSH_CLIENT", raising=False)
-        monkeypatch.delenv("SSH_TTY", raising=False)
-        monkeypatch.setenv("DISPLAY", ":0")
-        monkeypatch.setattr(os, "name", "posix")
-
-    def test_no_browser_env_skips_webbrowser_open(self, graphical_posix, monkeypatch, capsys):
-        monkeypatch.setenv("HERMES_MCP_OAUTH_NO_BROWSER", "1")
-        import asyncio
-
-        from tools import mcp_oauth as mod
-
-        with patch.object(mod.webbrowser, "open", return_value=True) as m_open:
-            asyncio.run(mod._redirect_handler("https://example.com/oauth?x=1"))
-        m_open.assert_not_called()
         err = capsys.readouterr().err
-        assert "Automatic browser open disabled" in err
-        assert "https://example.com/oauth?x=1" in err
-
-    def test_without_env_calls_webbrowser_when_allowed(self, graphical_posix, monkeypatch, capsys):
-        monkeypatch.delenv("HERMES_MCP_OAUTH_NO_BROWSER", raising=False)
-        import asyncio
-
-        from tools import mcp_oauth as mod
-
-        with patch.object(mod.webbrowser, "open", return_value=True) as m_open:
-            asyncio.run(mod._redirect_handler("https://example.com/authorize"))
-        m_open.assert_called_once_with("https://example.com/authorize")
-        assert capsys.readouterr().err.count("https://example.com/authorize") >= 1
-
-    def test_make_redirect_handler_open_browser_false_skips_webbrowser(
-        self, graphical_posix, monkeypatch, capsys,
-    ):
-        monkeypatch.delenv("HERMES_MCP_OAUTH_NO_BROWSER", raising=False)
-        import asyncio
-
-        from tools import mcp_oauth as mod
-
-        handler = mod.make_redirect_handler({"_resolved_port": 9876, "open_browser": False})
-        with patch.object(mod.webbrowser, "open", return_value=True) as m_open:
-            asyncio.run(handler("https://example.com/zap"))
-        m_open.assert_not_called()
-        err = capsys.readouterr().err
-        assert "127.0.0.1:9876/callback" in err
-        assert "https://example.com/zap" in err
-
-    def test_emit_aborts_ssh_before_printing_url(self, monkeypatch):
-        monkeypatch.setenv("SSH_CLIENT", "192.168.1.1 12345 22")
-        monkeypatch.delenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", raising=False)
-        import asyncio
-
-        from tools import mcp_oauth as mod
-
-        with pytest.raises(mod.OAuthNonInteractiveError):
-            asyncio.run(
-                mod._emit_mcp_oauth_authorization_url(
-                    "https://evil.example/oauth?nope=1",
-                    open_browser=True,
-                    callback_port=5555,
-                )
-            )
-
-    def test_emit_prints_url_when_allow_headless_over_ssh(self, monkeypatch, capsys):
-        monkeypatch.setenv("SSH_CLIENT", "192.168.1.1 12345 22")
-        monkeypatch.setenv("HERMES_MCP_OAUTH_ALLOW_HEADLESS", "1")
-        monkeypatch.setenv("HERMES_MCP_OAUTH_NO_BROWSER", "1")
-        import asyncio
-
-        from tools import mcp_oauth as mod
-
-        asyncio.run(
-            mod._emit_mcp_oauth_authorization_url(
-                "https://example.com/oauth",
-                open_browser=True,
-                callback_port=None,
-            )
-        )
-        err = capsys.readouterr().err
-        assert "https://example.com/oauth" in err
+        assert "ssh -N -L" not in err
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +412,7 @@ class TestOAuthPortSharing:
             pytest.skip("MCP SDK auth not available")
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
         build_oauth_auth("test-port", "https://example.com/mcp")
         assert mod._oauth_port is not None
         assert isinstance(mod._oauth_port, int)
@@ -573,32 +489,21 @@ class TestWaitForCallbackNoBlocking:
 class TestBuildOAuthAuthNonInteractive:
     """build_oauth_auth() in non-interactive mode."""
 
-    def test_noninteractive_without_cached_tokens_warns(self, tmp_path, monkeypatch, caplog):
-        """Without cached tokens, non-interactive mode logs a clear warning."""
-        try:
-            from mcp.client.auth import OAuthClientProvider
-        except ImportError:
-            pytest.skip("MCP SDK auth not available")
+    def test_noninteractive_without_cached_tokens_fails_fast(self, tmp_path, monkeypatch):
+        """Without cached tokens, non-interactive mode skips browser auth."""
+        pytest.importorskip("mcp.client.auth")
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         mock_stdin = MagicMock()
         mock_stdin.isatty.return_value = False
         monkeypatch.setattr("tools.mcp_oauth.sys.stdin", mock_stdin)
 
-        import logging
-        with caplog.at_level(logging.WARNING, logger="tools.mcp_oauth"):
-            auth = build_oauth_auth("atlassian", "https://mcp.atlassian.com/v1/mcp")
-
-        assert auth is not None
-        assert "no cached tokens found" in caplog.text.lower()
-        assert "non-interactive" in caplog.text.lower()
+        with pytest.raises(OAuthNonInteractiveError, match="non-interactive"):
+            build_oauth_auth("atlassian", "https://mcp.atlassian.com/v1/mcp")
 
     def test_noninteractive_with_cached_tokens_no_warning(self, tmp_path, monkeypatch, caplog):
         """With cached tokens, non-interactive mode logs no 'no cached tokens' warning."""
-        try:
-            from mcp.client.auth import OAuthClientProvider
-        except ImportError:
-            pytest.skip("MCP SDK auth not available")
+        pytest.importorskip("mcp.client.auth")
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         mock_stdin = MagicMock()
@@ -715,3 +620,210 @@ def test_build_oauth_auth_preserves_server_url_path():
     assert captured["server_url"] == "https://mcp.notion.com/mcp"
 
 
+
+class TestPasteCallbackReader:
+    """_paste_callback_reader parses redirect URLs / query strings from stdin."""
+
+    def _empty_result(self):
+        return {"auth_code": None, "state": None, "error": None}
+
+    def test_parses_full_local_redirect_url(self, monkeypatch):
+        result = self._empty_result()
+        monkeypatch.setattr(
+            "sys.stdin",
+            MagicMock(readline=lambda: "http://127.0.0.1:37949/callback?code=abc&state=xyz\n"),
+        )
+        _paste_callback_reader(result)
+        assert result["auth_code"] == "abc"
+        assert result["state"] == "xyz"
+        assert result["error"] is None
+
+    def test_parses_remote_provider_url(self, monkeypatch):
+        """User pastes the URL their browser ended up on, including a real host."""
+        result = self._empty_result()
+        url = "https://mcp.linear.app/callback?code=deadbeef&state=eyJ0ZXN0Ijoi"
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: url + "\n"))
+        _paste_callback_reader(result)
+        assert result["auth_code"] == "deadbeef"
+        assert result["state"] == "eyJ0ZXN0Ijoi"
+
+    def test_parses_bare_query_string(self, monkeypatch):
+        result = self._empty_result()
+        monkeypatch.setattr(
+            "sys.stdin",
+            MagicMock(readline=lambda: "code=token123&state=st1\n"),
+        )
+        _paste_callback_reader(result)
+        assert result["auth_code"] == "token123"
+        assert result["state"] == "st1"
+
+    def test_parses_leading_question_mark(self, monkeypatch):
+        result = self._empty_result()
+        monkeypatch.setattr(
+            "sys.stdin",
+            MagicMock(readline=lambda: "?code=tok&state=stA\n"),
+        )
+        _paste_callback_reader(result)
+        assert result["auth_code"] == "tok"
+        assert result["state"] == "stA"
+
+    def test_captures_error_param(self, monkeypatch):
+        result = self._empty_result()
+        monkeypatch.setattr(
+            "sys.stdin",
+            MagicMock(readline=lambda: "https://example/cb?error=access_denied\n"),
+        )
+        _paste_callback_reader(result)
+        assert result["auth_code"] is None
+        assert result["error"] == "access_denied"
+
+    def test_empty_input_noop(self, monkeypatch):
+        result = self._empty_result()
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: ""))
+        _paste_callback_reader(result)
+        assert result["auth_code"] is None
+        assert result["error"] is None
+
+    def test_garbage_input_noop(self, monkeypatch, capsys):
+        result = self._empty_result()
+        monkeypatch.setattr(
+            "sys.stdin", MagicMock(readline=lambda: "not a url at all\n")
+        )
+        _paste_callback_reader(result)
+        assert result["auth_code"] is None
+        assert result["error"] is None
+        err = capsys.readouterr().err
+        assert "did not contain" in err or "Could not parse" in err
+
+    def test_skips_when_http_listener_already_won(self, monkeypatch):
+        """If HTTP listener filled the result first, paste must not overwrite."""
+        result = {"auth_code": "from_http", "state": "http_state", "error": None}
+        monkeypatch.setattr(
+            "sys.stdin",
+            MagicMock(readline=lambda: "code=from_paste&state=paste_state\n"),
+        )
+        _paste_callback_reader(result)
+        assert result["auth_code"] == "from_http"
+        assert result["state"] == "http_state"
+
+    def test_swallows_stdin_errors(self, monkeypatch):
+        """OSError / interrupt on readline must not propagate."""
+        result = self._empty_result()
+        def raise_oserror():
+            raise OSError("stdin closed")
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=raise_oserror))
+        _paste_callback_reader(result)  # must not raise
+        assert result["auth_code"] is None
+
+
+class TestWaitForCallbackPasteIntegration:
+    """_wait_for_callback offers the paste prompt only when interactive."""
+
+    def test_paste_prompt_shown_on_tty(self, monkeypatch, capsys):
+        import tools.mcp_oauth as mod
+        mod._oauth_port = _find_free_port()
+        monkeypatch.setattr(mod, "_is_interactive", lambda: True)
+        # Make stdin readline block forever so HTTP listener path drives the test;
+        # we just want to verify the prompt was printed and the thread spawned.
+        def block_forever():
+            import threading
+            threading.Event().wait()
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=block_forever))
+
+        async def instant_sleep(_):
+            pass
+        with patch.object(mod.asyncio, "sleep", instant_sleep):
+            with pytest.raises(OAuthNonInteractiveError):
+                asyncio.run(_wait_for_callback())
+        err = capsys.readouterr().err
+        assert "paste the redirect URL" in err
+
+    def test_paste_prompt_NOT_shown_when_noninteractive(self, monkeypatch, capsys):
+        """Preserves existing invariant: no input() / paste prompt in headless runs."""
+        import tools.mcp_oauth as mod
+        mod._oauth_port = _find_free_port()
+        monkeypatch.setattr(mod, "_is_interactive", lambda: False)
+
+        async def instant_sleep(_):
+            pass
+        with patch.object(mod.asyncio, "sleep", instant_sleep):
+            with patch("builtins.input", side_effect=AssertionError("input() must not be called")):
+                with pytest.raises(OAuthNonInteractiveError):
+                    asyncio.run(_wait_for_callback())
+        err = capsys.readouterr().err
+        assert "paste the redirect URL" not in err
+
+
+class TestPasteCallbackSkipToken:
+    """User can type `skip` (or similar) at the paste prompt to bail out."""
+
+    def _empty_result(self):
+        return {"auth_code": None, "state": None, "error": None}
+
+    @pytest.mark.parametrize("token", ["skip", "SKIP", "Skip", "cancel", "s", "n", "no", "q", "quit"])
+    def test_skip_tokens_set_sentinel(self, monkeypatch, token):
+        from tools.mcp_oauth import _USER_SKIPPED_SENTINEL
+        result = self._empty_result()
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: token + "\n"))
+        _paste_callback_reader(result)
+        assert result["error"] == _USER_SKIPPED_SENTINEL
+        assert result["auth_code"] is None
+
+    def test_skip_message_printed(self, monkeypatch, capsys):
+        result = self._empty_result()
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: "skip\n"))
+        _paste_callback_reader(result)
+        err = capsys.readouterr().err
+        assert "OAuth skipped" in err
+        assert "hermes mcp login" in err
+
+    def test_skip_does_not_overwrite_http_winner(self, monkeypatch):
+        """If HTTP listener already wrote a code, `skip` must not stomp it."""
+        result = {"auth_code": "from_http", "state": "x", "error": None}
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: "skip\n"))
+        _paste_callback_reader(result)
+        assert result["auth_code"] == "from_http"
+        assert result["error"] is None
+
+    def test_skip_token_not_parsed_as_url(self, monkeypatch, capsys):
+        """`skip` must NOT fall through to URL parsing (which would silently no-op)."""
+        from tools.mcp_oauth import _USER_SKIPPED_SENTINEL
+        result = self._empty_result()
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: "skip\n"))
+        _paste_callback_reader(result)
+        # Must take skip path, not the "did not contain code=" path
+        assert result["error"] == _USER_SKIPPED_SENTINEL
+        err = capsys.readouterr().err
+        assert "did not contain" not in err
+
+
+class TestWaitForCallbackSkipIntegration:
+    """_wait_for_callback maps the skip sentinel to OAuthNonInteractiveError."""
+
+    def test_skip_raises_non_interactive_error(self, monkeypatch):
+        """Skip token must raise OAuthNonInteractiveError (mcp_tool handles as non-fatal)."""
+        import tools.mcp_oauth as mod
+        mod._oauth_port = _find_free_port()
+        monkeypatch.setattr(mod, "_is_interactive", lambda: True)
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: "skip\n"))
+
+        async def instant_sleep(_):
+            pass
+        with patch.object(mod.asyncio, "sleep", instant_sleep):
+            with pytest.raises(OAuthNonInteractiveError, match="user_skipped"):
+                asyncio.run(_wait_for_callback())
+
+    def test_paste_prompt_mentions_skip(self, monkeypatch, capsys):
+        """The interactive prompt must tell users about the skip option."""
+        import tools.mcp_oauth as mod
+        mod._oauth_port = _find_free_port()
+        monkeypatch.setattr(mod, "_is_interactive", lambda: True)
+        monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: "skip\n"))
+
+        async def instant_sleep(_):
+            pass
+        with patch.object(mod.asyncio, "sleep", instant_sleep):
+            with pytest.raises(OAuthNonInteractiveError):
+                asyncio.run(_wait_for_callback())
+        err = capsys.readouterr().err
+        assert "skip" in err.lower()

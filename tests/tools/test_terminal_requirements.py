@@ -1,8 +1,6 @@
 import importlib
 import logging
-import os
 
-import pytest
 
 terminal_tool_module = importlib.import_module("tools.terminal_tool")
 
@@ -22,15 +20,8 @@ def _clear_terminal_env(monkeypatch):
         "TERMINAL_SSH_PORT",
         "TERMINAL_SSH_USER",
         "TERMINAL_TIMEOUT",
-        "TERMINAL_VERCEL_RUNTIME",
         "MODAL_TOKEN_ID",
         "MODAL_TOKEN_SECRET",
-        "VERCEL_OIDC_TOKEN",
-        "VERCEL_TOKEN",
-        "VERCEL_PROJECT_ID",
-        "VERCEL_TEAM_ID",
-        "VERCEL_DEFAULT_PROJECT_ID",
-        "VERCEL_LINK_SEARCH_PATHS",
         "HOME",
         "USERPROFILE",
     ]
@@ -173,7 +164,7 @@ def test_modal_backend_managed_mode_does_not_fall_back_to_direct(monkeypatch, ca
 
     assert ok is False
     assert any(
-        "paid Nous subscription is required" in record.getMessage()
+        "Nous Tool Gateway access is not currently available" in record.getMessage()
         for record in caplog.records
     )
 
@@ -191,163 +182,6 @@ def test_modal_backend_managed_mode_without_feature_flag_logs_clear_error(monkey
 
     assert ok is False
     assert any(
-        "paid Nous subscription is required" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_vercel_backend_without_sdk_logs_specific_error(monkeypatch, caplog):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: None)
-
-    with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
-
-    assert ok is False
-    assert any(
-        "vercel is required for the Vercel Sandbox terminal backend" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_vercel_backend_without_auth_logs_specific_error(monkeypatch, caplog):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
-
-    assert ok is False
-    assert any(
-        "no supported auth configuration was found" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_vercel_backend_accepts_oidc_auth(monkeypatch):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    assert terminal_tool_module.check_terminal_requirements() is True
-
-
-def test_vercel_backend_accepts_token_tuple_auth(monkeypatch):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("VERCEL_TOKEN", "token")
-    monkeypatch.setenv("VERCEL_PROJECT_ID", "project")
-    monkeypatch.setenv("VERCEL_TEAM_ID", "team")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    assert terminal_tool_module.check_terminal_requirements() is True
-
-
-def test_vercel_backend_resolves_project_from_vercel_link(monkeypatch, tmp_path):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "node22")
-    monkeypatch.setenv("VERCEL_TOKEN", "token")
-    monkeypatch.setenv("VERCEL_TEAM_ID", "team")
-    monkeypatch.delenv("VERCEL_PROJECT_ID", raising=False)
-    vercel = tmp_path / ".vercel"
-    vercel.mkdir()
-    (vercel / "project.json").write_text(
-        '{"projectId":"prj_linked","orgId":"team_linked"}', encoding="utf-8"
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    assert terminal_tool_module.check_terminal_requirements() is True
-    assert os.environ.get("VERCEL_PROJECT_ID") == "prj_linked"
-
-
-def test_vercel_backend_resolves_project_from_default_id(monkeypatch, tmp_path):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "node22")
-    monkeypatch.setenv("VERCEL_TOKEN", "token")
-    monkeypatch.setenv("VERCEL_TEAM_ID", "team")
-    monkeypatch.setenv("VERCEL_DEFAULT_PROJECT_ID", "prj_default")
-    monkeypatch.delenv("VERCEL_PROJECT_ID", raising=False)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    assert terminal_tool_module.check_terminal_requirements() is True
-    assert os.environ.get("VERCEL_PROJECT_ID") == "prj_default"
-
-
-@pytest.mark.parametrize("runtime", ["node24", "node22", "python3.13"])
-def test_vercel_backend_accepts_supported_runtimes(monkeypatch, runtime):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", runtime)
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    assert terminal_tool_module.check_terminal_requirements() is True
-
-
-def test_vercel_backend_accepts_blank_runtime(monkeypatch):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "   ")
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    assert terminal_tool_module.check_terminal_requirements() is True
-
-
-def test_vercel_backend_rejects_unsupported_runtime(monkeypatch, caplog):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "node20")
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
-
-    assert ok is False
-    assert any(
-        "Vercel Sandbox runtime 'node20' is not supported" in record.getMessage()
-        and "node24, node22, python3.13" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_vercel_backend_rejects_nondefault_disk(monkeypatch, caplog):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("TERMINAL_CONTAINER_DISK", "8192")
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
-
-    assert ok is False
-    assert any(
-        "does not support custom TERMINAL_CONTAINER_DISK=8192" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_vercel_backend_rejects_malformed_disk_without_raising(monkeypatch, caplog):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setenv("TERMINAL_CONTAINER_DISK", "large")
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
-
-    with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
-
-    assert ok is False
-    assert any(
-        "Invalid value for TERMINAL_CONTAINER_DISK" in record.getMessage()
+        "Nous Tool Gateway access is not currently available" in record.getMessage()
         for record in caplog.records
     )

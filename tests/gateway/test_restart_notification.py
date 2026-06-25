@@ -1,6 +1,5 @@
 """Tests for /restart notification — the gateway notifies the requester on comeback."""
 
-import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -8,11 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
-from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
+from gateway.config import HomeChannel, Platform
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import (
-    RestartTestAdapter,
     make_restart_runner,
     make_restart_source,
 )
@@ -32,6 +30,19 @@ def test_restart_notification_pending_true_with_marker(tmp_path, monkeypatch):
     (tmp_path / ".restart_notify.json").write_text("{}")
 
     assert gateway_run._restart_notification_pending() is True
+
+
+def test_planned_restart_notification_pending_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    marker = tmp_path / ".restart_pending.json"
+
+    assert gateway_run._planned_restart_notification_pending() is False
+    marker.write_text("{}")
+    assert gateway_run._planned_restart_notification_pending() is True
+
+    gateway_run._clear_planned_restart_notification()
+
+    assert gateway_run._planned_restart_notification_pending() is False
 
 
 # ── _handle_restart_command writes .restart_notify.json ──────────────────
@@ -61,6 +72,8 @@ async def test_restart_command_writes_notify_file(tmp_path, monkeypatch):
     data = json.loads(notify_path.read_text())
     assert data["platform"] == "telegram"
     assert data["chat_id"] == "42"
+    assert data["chat_type"] == "dm"
+    assert data["message_id"] == "m1"
     assert "thread_id" not in data  # no thread → omitted
 
 
@@ -114,8 +127,7 @@ async def test_restart_command_preserves_thread_id(tmp_path, monkeypatch):
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)
 
-    source = make_restart_source(chat_id="99")
-    source.thread_id = "topic_7"
+    source = make_restart_source(chat_id="99", thread_id="777")
 
     event = MessageEvent(
         text="/restart",
@@ -127,7 +139,9 @@ async def test_restart_command_preserves_thread_id(tmp_path, monkeypatch):
     await runner._handle_restart_command(event)
 
     data = json.loads((tmp_path / ".restart_notify.json").read_text())
-    assert data["thread_id"] == "topic_7"
+    assert data["chat_type"] == "dm"
+    assert data["thread_id"] == "777"
+    assert data["message_id"] == "m2"
 
 
 @pytest.mark.asyncio
@@ -139,6 +153,10 @@ async def test_restart_command_uses_atomic_json_writes_for_marker_files(tmp_path
     def _fake_atomic_json_write(path, payload, **kwargs):
         calls.append((Path(path).name, payload, kwargs))
 
+    # _handle_restart_command lives in gateway/slash_commands.py (extracted from
+    # run.py); it uses that module's top-level atomic_json_write import.
+    import gateway.slash_commands as gateway_slash
+    monkeypatch.setattr(gateway_slash, "atomic_json_write", _fake_atomic_json_write)
     monkeypatch.setattr(gateway_run, "atomic_json_write", _fake_atomic_json_write)
 
     runner, _adapter = make_restart_runner()
@@ -260,17 +278,31 @@ async def test_send_home_channel_startup_notification_preserves_thread_metadata(
         platform=Platform.TELEGRAM,
         chat_id="parent-42",
         name="Ops Topic",
-        thread_id="topic-7",
+        thread_id="777",
     )
+    # Declare the DM-topic lookup on the adapter CLASS, not the instance.
+    # _is_telegram_dm_topic_target resolves _get_dm_topic_info via type(adapter)
+    # so a MagicMock auto-attribute (instance-level) is intentionally ignored;
+    # a real adapter exposes the method on its class. Mirrors the fake-adapter
+    # pattern in test_telegram_topic_mode.py.
+    class _DmTopicAdapter(type(adapter)):
+        def _get_dm_topic_info(self, chat_id, thread_id):
+            return {"name": "Ops Topic"}
+
+    adapter.__class__ = _DmTopicAdapter
     adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="home"))
 
     delivered = await runner._send_home_channel_startup_notifications()
 
-    assert delivered == {("telegram", "parent-42", "topic-7")}
+    assert delivered == {("telegram", "parent-42", "777")}
     adapter.send.assert_called_once_with(
         "parent-42",
         "♻️ Gateway online — Hermes is back and ready.",
-        metadata={"thread_id": "topic-7"},
+        metadata={
+            "thread_id": "777",
+            "telegram_dm_topic_reply_fallback": True,
+            "direct_messages_topic_id": "777",
+        },
     )
 
 
@@ -375,7 +407,9 @@ async def test_send_restart_notification_with_thread(tmp_path, monkeypatch):
     notify_path.write_text(json.dumps({
         "platform": "telegram",
         "chat_id": "99",
-        "thread_id": "topic_7",
+        "chat_type": "dm",
+        "thread_id": "777",
+        "message_id": "m2",
     }))
 
     runner, adapter = make_restart_runner()
@@ -383,9 +417,14 @@ async def test_send_restart_notification_with_thread(tmp_path, monkeypatch):
 
     delivered_target = await runner._send_restart_notification()
 
-    assert delivered_target == ("telegram", "99", "topic_7")
+    assert delivered_target == ("telegram", "99", "777")
     call_args = adapter.send.call_args
-    assert call_args[1]["metadata"] == {"thread_id": "topic_7"}
+    assert call_args[1]["metadata"] == {
+        "thread_id": "777",
+        "telegram_dm_topic_reply_fallback": True,
+        "direct_messages_topic_id": "777",
+        "telegram_reply_to_message_id": "m2",
+    }
     assert not notify_path.exists()
 
 
@@ -627,83 +666,25 @@ async def test_shutdown_notifications_use_cached_live_thread_source_when_origin_
 
 
 @pytest.mark.asyncio
-async def test_startup_home_notifications_only_operator_platform(tmp_path, monkeypatch):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+async def test_restart_shutdown_notification_anchors_telegram_dm_topic():
+    runner, adapter = make_restart_runner()
+    runner._restart_requested = True
+    source = make_restart_source(chat_id="123456", thread_id="20197")
+    source.message_id = "462"
+    session_key = build_session_key(source)
 
-    runner = object.__new__(gateway_run.GatewayRunner)
-    runner.config = GatewayConfig(
-        gateway_operator_notify_platform="whatsapp",
-        platforms={
-            Platform.TELEGRAM: PlatformConfig(
-                enabled=True,
-                token="***",
-                home_channel=HomeChannel(
-                    platform=Platform.TELEGRAM, chat_id="tg-home", name="T"
-                ),
-            ),
-            Platform.WHATSAPP: PlatformConfig(
-                enabled=True,
-                home_channel=HomeChannel(
-                    platform=Platform.WHATSAPP, chat_id="wa-home", name="W"
-                ),
-            ),
-        },
-    )
-    tg_ad = RestartTestAdapter()
-    wa_ad = RestartTestAdapter()
-    wa_ad.platform = Platform.WHATSAPP
-    tg_ad.send = AsyncMock(return_value=SendResult(success=True, message_id="1"))
-    wa_ad.send = AsyncMock(return_value=SendResult(success=True, message_id="2"))
-    runner.adapters = {Platform.TELEGRAM: tg_ad, Platform.WHATSAPP: wa_ad}
-    runner._send_home_channel_startup_notifications = (
-        gateway_run.GatewayRunner._send_home_channel_startup_notifications.__get__(
-            runner, gateway_run.GatewayRunner
-        )
-    )
+    runner._running_agents[session_key] = object()
+    runner.session_store._entries[session_key] = MagicMock(origin=source)
+    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="shutdown"))
 
-    delivered = await runner._send_home_channel_startup_notifications()
+    await runner._notify_active_sessions_of_shutdown()
 
-    assert delivered == {("whatsapp", "wa-home", None)}
-    tg_ad.send.assert_not_called()
-    wa_ad.send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_restart_notification_redirects_to_operator_home(tmp_path, monkeypatch):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    notify_path = tmp_path / ".restart_notify.json"
-    notify_path.write_text(
-        json.dumps({"platform": "telegram", "chat_id": "42"}),
-    )
-
-    runner = object.__new__(gateway_run.GatewayRunner)
-    runner.config = GatewayConfig(
-        gateway_operator_notify_platform="whatsapp",
-        platforms={
-            Platform.TELEGRAM: PlatformConfig(enabled=True, token="***"),
-            Platform.WHATSAPP: PlatformConfig(
-                enabled=True,
-                home_channel=HomeChannel(
-                    platform=Platform.WHATSAPP, chat_id="wa-home", name="W"
-                ),
-            ),
-        },
-    )
-    tg_ad = RestartTestAdapter()
-    wa_ad = RestartTestAdapter()
-    wa_ad.platform = Platform.WHATSAPP
-    tg_ad.send = AsyncMock()
-    wa_ad.send = AsyncMock(return_value=SendResult(success=True, message_id="x"))
-    runner.adapters = {Platform.TELEGRAM: tg_ad, Platform.WHATSAPP: wa_ad}
-    runner._send_restart_notification = (
-        gateway_run.GatewayRunner._send_restart_notification.__get__(
-            runner, gateway_run.GatewayRunner
-        )
-    )
-
-    target = await runner._send_restart_notification()
-
-    assert target == ("whatsapp", "wa-home", None)
-    tg_ad.send.assert_not_called()
-    wa_ad.send.assert_awaited_once()
-    assert not notify_path.exists()
+    call = adapter.send.await_args
+    assert call.args[0] == "123456"
+    assert "Gateway restarting" in call.args[1]
+    assert call.kwargs["metadata"] == {
+        "thread_id": "20197",
+        "telegram_dm_topic_reply_fallback": True,
+        "direct_messages_topic_id": "20197",
+        "telegram_reply_to_message_id": "462",
+    }
