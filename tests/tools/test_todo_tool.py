@@ -210,3 +210,54 @@ class TestTodoStoreBounds:
         items = store.read()
         assert [i["content"] for i in items] == ["write the report", "review PR"]
         assert "[truncated]" not in items[0]["content"]
+
+
+class TestUserGatedCompletion:
+    def test_agent_cannot_mark_complete_until_user_confirms(self):
+        store = TodoStore()
+        store.write([{"id": "1", "content": "Ship A14", "status": "in_progress"}])
+        result = json.loads(todo_tool(
+            todos=[{"id": "1", "content": "Ship A14", "status": "completed"}],
+            merge=True,
+            store=store,
+        ))
+        assert result["todos"][0]["status"] == "in_progress"
+        assert store.keep_open() is True
+
+    def test_user_done_confirms_in_progress_item(self):
+        from tools.todo_tool import confirm_from_user_text
+        store = TodoStore()
+        store.write([
+            {"id": "1", "content": "Ship A14", "status": "in_progress"},
+            {"id": "2", "content": "Ship A15", "status": "pending"},
+        ])
+        assert confirm_from_user_text(store, "done") == ["1"]
+        assert store.read()[0]["status"] == "completed"
+        assert store.read()[1]["status"] == "pending"
+        assert store.keep_open() is True
+
+    def test_all_done_confirms_every_open_item(self):
+        from tools.todo_tool import confirm_from_user_text
+        store = TodoStore()
+        store.write([
+            {"id": "1", "content": "One", "status": "in_progress"},
+            {"id": "2", "content": "Two", "status": "pending"},
+        ])
+        assert set(confirm_from_user_text(store, "all done")) == {"1", "2"}
+        assert all(item["status"] == "completed" for item in store.read())
+        assert store.keep_open() is False
+
+    def test_new_task_wording_does_not_confirm(self):
+        from tools.todo_tool import confirm_from_user_text
+        store = TodoStore()
+        store.write([{"id": "1", "content": "Login page", "status": "in_progress"}])
+        assert confirm_from_user_text(store, "please complete the login page") == []
+        assert store.read()[0]["status"] == "in_progress"
+
+    def test_user_add_edit_delete(self):
+        store = TodoStore()
+        store.add_item("Write the plus button")
+        assert store.read()[0]["content"] == "Write the plus button"
+        store.write([{"id": "1", "content": "Write the plus and edit"}], merge=True)
+        store.delete_ids(["1"])
+        assert store.read() == []

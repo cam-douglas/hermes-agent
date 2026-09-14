@@ -5151,6 +5151,8 @@ async def _start_gateway_shutdown_tail(
 
     _best_effort(_stop_keepalive)
     if _exit_with_failure_verdict(runner):
+        with suppress(Exception):
+            await runner._send_gateway_unhealthy_notification(runner.exit_reason)
         return False
 
     # Never join(): an in-flight cron delivery is a coroutine on THIS loop; a sync join would drop it.
@@ -5293,6 +5295,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         _shutdown_gateway_health_export(runner)
         raise
     if not success:
+        if runner.should_exit_with_failure:
+            with suppress(Exception):
+                await runner._send_gateway_unhealthy_notification(runner.exit_reason)
         _shutdown_gateway_health_export(runner)
         return False
 

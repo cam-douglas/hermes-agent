@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionInfo } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import type * as ChatRuntime from '@/lib/chat-runtime'
+import { formatSydneyStamp } from '@/lib/time'
 import type * as Time from '@/lib/time'
 import type * as ComposerStatusStore from '@/store/composer-status'
 import type * as SessionStore from '@/store/session'
@@ -353,10 +354,11 @@ describe('SidebarSessionRow', () => {
       />
     )
 
-    const age = screen.getByText('5m')
+    const stamp = formatSydneyStamp(startedAt * 1000)
+    const age = screen.getByText(stamp)
     expect(age.tagName).toBe('TIME')
     expect(age.getAttribute('datetime')).toBe(new Date(startedAt * 1000).toISOString())
-    expect(age.getAttribute('aria-label')).toMatch(/^5m, Today at /)
+    expect(age.getAttribute('aria-label')).toMatch(new RegExp(`^${stamp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, `))
     expect(age.getAttribute('tabindex')).toBe('0')
     expect(age.getAttribute('title')).toBeNull()
     expect(tipTrigger(age)).toBeTruthy()

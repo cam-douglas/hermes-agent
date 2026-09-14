@@ -126,6 +126,28 @@ def _safe_context_slug(value: str, max_len: int = 96) -> str:
     return (slug or "ctx")[:max_len]
 
 
+def _human_chat_name(text: str, peer: str) -> str:
+    """Sidebar title from the inbound A2A message instead of a generic a2a:peer label."""
+    skip = (
+        "you were started by hermes", "do not ask the user", "session title:",
+        "hermes a2a context:", "when you finish", "cursor finished",
+    )
+    chosen = ""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if any(low.startswith(p) for p in skip):
+            continue
+        chosen = line
+        break
+    chosen = re.sub(r"\s+", " ", chosen).strip(" -:")
+    if len(chosen) > 72:
+        chosen = chosen[:69].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
+    return chosen or f"A2A from {peer}"
+
+
 def _state_db(profile: str, sql: str, params: tuple, log_msg: str, *, commit: bool = False) -> str:
     """Run one statement against a profile's state.db; first column of the first row or ""."""
     home = _profile_home(profile)
@@ -521,7 +543,7 @@ class A2AAdapter(BasePlatformAdapter):
             return self._end_task(rec, protocol.STATE_FAILED, "Agent gateway not ready to accept A2A tasks.")
         fut = self._add_pending(task_id, context_id)
         event = MessageEvent(text=framed, message_type=MessageType.TEXT, message_id=task_id,
-                             source=self.build_source(chat_id=context_id, chat_name=f"a2a:{peer}", chat_type="dm", user_id=peer, user_name=peer))
+                             source=self.build_source(chat_id=context_id, chat_name=_human_chat_name(text, peer), chat_type="dm", user_id=peer, user_name=peer))
         try:
             asyncio.run_coroutine_threadsafe(self.handle_message(event), self._loop)
         except Exception as e:

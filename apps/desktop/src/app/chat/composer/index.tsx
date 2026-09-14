@@ -21,7 +21,6 @@ import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } f
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
 import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
 import { $hudMode } from '@/store/hud'
-import { sessionBlockingPrompt } from '@/store/prompts'
 import { toggleReview } from '@/store/review'
 import { $gatewayState } from '@/store/session'
 import { $botChatSessionIds, $sessionStates, $sessionTiles, isBotChatSession } from '@/store/session-states'
@@ -169,10 +168,6 @@ export function ChatBar({
   // would discard a question the user may want to come back to. The blocking
   // prompt owns its own dismissal (Skip, Reject, dialog close).
   const awaitingInput = useStore(scope.$awaitingInput)
-  // Parked on an approval/sudo/secret prompt: typing can't answer those, so the
-  // busy submit routes text to the queue instead of a steer (which would sit
-  // undelivered behind the blocked tool batch). Drives the button affordance.
-  const blockingPrompt = useStore(useMemo(() => sessionBlockingPrompt(sessionId ?? null), [sessionId]))
   const activeQueueSessionKey = queueSessionKey || sessionId || null
 
   // Status items (subagents, background processes) are keyed by the RUNTIME
@@ -237,7 +232,6 @@ export function ChatBar({
     insertInlineRefs,
     insertText,
     isHelpHint,
-    isSteerableText,
     loadIntoComposer,
     requestMainFocus,
     sessionIdRef,
@@ -345,23 +339,13 @@ export function ChatBar({
   const hasComposerPayload = hasText || attachments.length > 0
   const canSubmit = busy || hasComposerPayload
 
-  // Steer only makes sense mid-turn, text-only (the gateway can't carry images
-  // into a tool result) and never for a slash command (those execute inline).
-  // A blocking prompt (approval/sudo/secret) also rules it out: the tool batch
-  // is parked on the user, so a steer can't reach the model — text queues.
-  const canSteer = busy && !compacting && !blockingPrompt && !!onSteer && attachments.length === 0 && isSteerableText
-
-  // While busy: text redirects the live turn (Cursor-style stop-and-correct),
-  // attachments queue for the next turn, an empty composer stops.
-  const busyAction: 'steer' | 'queue' | 'stop' = canSteer
-    ? 'steer'
-    : compacting || hasComposerPayload
-      ? 'queue'
-      : 'stop'
+  // While busy: a payload queues for the next turn. Empty composer stops.
+  // Redirect/steer stays on the queue-panel Steer control, not the default send.
+  const busyAction: 'steer' | 'queue' | 'stop' = compacting || hasComposerPayload ? 'queue' : 'stop'
 
   // The submit engine — the orchestration seam where draft + queue meet. Owns
   // the submit decision tree, the send-with-restore primitive, and steer.
-  const { queueDraft, steerDraft, submitDraft } = useComposerSubmit({
+  const { queueDraft, submitDraft } = useComposerSubmit({
     activeQueueSessionKey,
     activeQueueSessionKeyRef,
     attachments,
@@ -850,21 +834,26 @@ export function ChatBar({
       return
     }
 
-    // Cmd/Ctrl+Enter queues a follow-up while a turn runs. Plain Enter steers
-    // a text-only draft, so both live-turn actions stay reachable by keyboard.
+    // Cmd/Ctrl+Enter saves a queued-prompt edit. Otherwise it queues a
+    // follow-up while a turn runs. Plain Enter also saves or queues — it
+    // does not interrupt the live turn.
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.shiftKey) {
       event.preventDefault()
 
-      if (busy && !disabled) {
-        // As with plain Enter, source the just-typed content from the DOM so a
-        // fast keypress cannot queue a stale draft.
-        const editorText = editorRef.current ? composerPlainText(editorRef.current) : draftRef.current
+      if (disabled) {
+        return
+      }
 
-        if (editorText !== draftRef.current) {
-          draftRef.current = editorText
-          setComposerText(editorText)
-        }
+      const editorText = editorRef.current ? composerPlainText(editorRef.current) : draftRef.current
 
+      if (editorText !== draftRef.current) {
+        draftRef.current = editorText
+        setComposerText(editorText)
+      }
+
+      if (queueEdit) {
+        submitDraft()
+      } else if (busy) {
         queueDraft()
       }
 
@@ -893,21 +882,9 @@ export function ChatBar({
         return
       }
 
-      // Empty Enter while busy. With prompts queued this is the double-send:
-      // the first Enter put the words in the queue, a second sends them now
-      // (promote + interrupt + drain on settle), mirroring the idle empty-Enter
-      // drain above. With nothing queued it stays a no-op — interrupting is
-      // explicit (Stop/Esc), never a stray Enter after sending. Gate on the live
-      // DOM payload (not the render-lagged composer state) so a message typed
-      // fast / via IME while busy still reaches submitDraft() and gets queued
-      // instead of being mistaken for an empty Enter.
+      // Empty Enter while busy is a no-op. Interrupting is explicit (Stop/Esc
+      // or the queue-panel Send now control), never a stray Enter after queueing.
       if (busy && !hasLivePayload) {
-        const head = queuedPrompts.find(entry => entry.id !== queueEdit?.entryId)
-
-        if (head) {
-          sendQueuedNow(head.id)
-        }
-
         return
       }
 
@@ -1208,6 +1185,9 @@ export function ChatBar({
                     }
                   }}
                   onEdit={beginQueuedEdit}
+                  onSave={() => {
+                    exitQueuedEdit('save')
+                  }}
                   onResume={() => {
                     unparkQueuedPrompts(activeQueueSessionKey)
 

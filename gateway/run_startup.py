@@ -208,12 +208,16 @@ class GatewayStartupMixin:
         claimed = await self._claim_pending_obligations()
 
         async def _boot_sends() -> None:
-            await self._send_restart_notification()
-            if planned_restart_notification_pending:
-                try:
-                    await self._send_home_channel_startup_notifications(skip_targets=None)
-                finally:
-                    _clear_planned_restart_notification()
+            restart_target = None
+            # A service/external restart uses the planned marker; deliver the healthy receipt only
+            # after adapters are connected, then clear the one-shot marker after the send attempt.
+            if self.adapters:
+                restart_target = await self._send_restart_notification()
+                if planned_restart_notification_pending:
+                    skip_targets = {restart_target} if restart_target else None
+                    delivered = await self._send_home_channel_startup_notifications(skip_targets=skip_targets)
+                    if delivered:
+                        _clear_planned_restart_notification()
             await self._redeliver_claimed_obligations(claimed)
 
         boot_task = asyncio.create_task(_boot_sends())

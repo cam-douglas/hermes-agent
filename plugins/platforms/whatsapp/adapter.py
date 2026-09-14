@@ -15,7 +15,7 @@ from typing import Dict, Optional, Any
 
 from gateway.platforms._shared import get_scoped_secret
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
-from hermes_constants import (find_node_executable, get_hermes_dir, with_hermes_node_path)
+from hermes_constants import (find_node_executable, with_hermes_node_path)
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -254,14 +254,14 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WHATSAPP)
+        from gateway.platforms.whatsapp_common import resolve_whatsapp_bridge_dir, whatsapp_session_dir
         if WhatsAppAdapter._DEFAULT_BRIDGE_DIR is None:
-            from gateway.platforms.whatsapp_common import resolve_whatsapp_bridge_dir
             WhatsAppAdapter._DEFAULT_BRIDGE_DIR = resolve_whatsapp_bridge_dir()
         extra = config.extra
         self._bridge_process: Optional[subprocess.Popen] = None
         self._bridge_port: int = extra.get("bridge_port", 3000)
         self._bridge_script: str = extra.get("bridge_script", str(self._DEFAULT_BRIDGE_DIR / "bridge.js"))
-        self._session_path = Path(extra.get("session_path", get_hermes_dir("platforms/whatsapp/session", "whatsapp/session")))
+        self._session_path = Path(extra.get("session_path", whatsapp_session_dir()))
         self._reply_prefix: Optional[str] = extra.get("reply_prefix")
         self._dm_policy = str(extra.get("dm_policy") or _wenv("WHATSAPP_DM_POLICY", "pairing")).strip().lower()
         self._allow_from = self._coerce_allow_list(self._select_dm_allowlist(extra, ("WHATSAPP_ALLOWED_USERS",), _wenv))

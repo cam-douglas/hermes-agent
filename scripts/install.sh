@@ -2990,8 +2990,10 @@ maybe_start_gateway() {
 
     # If WhatsApp is enabled and no session exists yet, run foreground first for QR scan
     WHATSAPP_VAL=$(grep "^WHATSAPP_ENABLED=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2-)
-    WHATSAPP_SESSION="$HERMES_HOME/whatsapp/session/creds.json"
-    if [ "$WHATSAPP_VAL" = "true" ] && [ ! -f "$WHATSAPP_SESSION" ]; then
+    # Canonical platforms/ path first; honour populated legacy whatsapp/session (same as get_hermes_dir).
+    WHATSAPP_SESSION_NEW="$HERMES_HOME/platforms/whatsapp/session/creds.json"
+    WHATSAPP_SESSION_OLD="$HERMES_HOME/whatsapp/session/creds.json"
+    if [ "$WHATSAPP_VAL" = "true" ] && [ ! -f "$WHATSAPP_SESSION_NEW" ] && [ ! -f "$WHATSAPP_SESSION_OLD" ]; then
         if [ "$IS_INTERACTIVE" = true ]; then
             echo ""
             log_info "WhatsApp is enabled but not yet paired."

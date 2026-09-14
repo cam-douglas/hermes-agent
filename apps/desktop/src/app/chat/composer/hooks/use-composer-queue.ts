@@ -309,7 +309,7 @@ export function useComposerQueue({
 
       triggerHaptic('submit')
 
-      const accepted = await Promise.resolve(onSteer(entry.text))
+      const accepted = await Promise.resolve(onSteer(entry.text, { interrupt: true }))
 
       // Rejected (turn already settling, gateway said no): leave the entry
       // queued exactly where it was — the settle drain picks it up, so the

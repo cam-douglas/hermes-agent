@@ -17,6 +17,28 @@ from agent.tool_result_classification import (
 
 _NO_REPLY = "⚠️ No reply: "
 
+# Tool-result text that means "asked for permission / waiting / denied" rather
+# than a silent write miss. Matched case-insensitively against the error preview.
+_PERMISSION_GATED_ERROR_MARKERS = (
+    "asking the user for approval",
+    "approval_required",
+    "pending_approval",
+    "requires approval",
+    "was denied by the user",
+    "approval prompt timed out",
+    "no interactive user or gateway is present to approve",
+    "approval subsystem is unavailable",
+    "the user has not consented",
+    "refusing to write to hermes config",
+    "write to hermes settings file",
+)
+
+
+def _is_permission_gated_mutation_error(preview: str) -> bool:
+    """True when a failed write/patch is a permission ask, not a silent miss."""
+    text = (preview or "").lower()
+    return any(marker in text for marker in _PERMISSION_GATED_ERROR_MARKERS)
+
 # Exact ``turn_exit_reason`` → explanation body (prefixed with ``_NO_REPLY``).
 _EXIT_REASON_EXPLANATIONS: Dict[str, str] = {
     "empty_response_exhausted": (
@@ -214,8 +236,13 @@ class TurnExplainersMixin:
                     with suppress(Exception):
                         mgr.record_agent_write(_p)
         if is_error and not landed:
-            # Keep the FIRST error per path unless a later success replaces it.
             preview = _extract_error_preview(result)
+            # Permission / approval gates ask BEFORE the write. Those are not
+            # silent mutation misses — do not append a post-hoc "NOT modified"
+            # footer after the user was (or should have been) prompted.
+            if _is_permission_gated_mutation_error(preview):
+                return
+            # Keep the FIRST error per path unless a later success replaces it.
             for path in targets:
                 state.setdefault(path, {"tool": tool_name, "error_preview": preview})
         else:

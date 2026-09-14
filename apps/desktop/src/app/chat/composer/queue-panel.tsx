@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
 import { type Translations, useI18n } from '@/i18n'
-import { CornerDownLeft, iconSize, Pencil, SteeringWheel, Trash2 } from '@/lib/icons'
+import { CornerDownLeft, iconSize, Pencil, Save, SteeringWheel, Trash2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { isSteerableEntry, type QueuedPromptEntry } from '@/store/composer-queue'
 
@@ -16,6 +16,7 @@ interface QueuePanelProps {
   onEdit: (entry: QueuedPromptEntry) => void
   /** Lift a park (explicit Stop/Esc halt) and let the queue flow again. */
   onResume: () => void
+  onSave?: () => void
   onSendNow: (id: string) => void
   /** Deliver an entry as a mid-turn redirect (no interrupt). Absent when the
    *  host has no steer path — the affordance hides rather than dead-clicks. */
@@ -34,6 +35,7 @@ export function QueuePanel({
   onDelete,
   onEdit,
   onResume,
+  onSave,
   onSendNow,
   onSteerNow,
   parked
@@ -94,6 +96,20 @@ export function QueuePanel({
                     <Pencil className={iconSize.xs} />
                   </Button>
                 </Tip>
+                {isEditing && onSave && (
+                  <Tip label={t.common.save}>
+                    <Button
+                      aria-label={t.common.save}
+                      className="size-5 rounded-md"
+                      onClick={onSave}
+                      size="icon-xs"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <Save className={iconSize.xs} />
+                    </Button>
+                  </Tip>
+                )}
                 {canSteer && (
                   <Tip label={c.queueSteer}>
                     <Button

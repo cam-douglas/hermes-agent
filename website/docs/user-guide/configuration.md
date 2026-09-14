@@ -2038,7 +2038,7 @@ Example footer:
   • concepts/rag-pipeline.md — [patch] Could not find match for old_string
 ```
 
-Set `file_mutation_verifier: false` (or `HERMES_FILE_MUTATION_VERIFIER=0`) to suppress the footer. The verifier only fires when real failures are outstanding at turn end — a model that retries a failed patch and succeeds within the same turn will not trigger it for that file.
+Set `file_mutation_verifier: false` (or `HERMES_FILE_MUTATION_VERIFIER=0`) to suppress the footer. The verifier only fires when real failures are outstanding at turn end — a model that retries a failed patch and succeeds within the same turn will not trigger it for that file. Permission-gated writes (live `config.yaml`, protected instruction files, `~/.ssh/config`) ask **before** the edit and are not listed as post-hoc "NOT modified" failures.
 
 **Trust the verifier over the model's summary.** The footer means the listed files were **not** modified on disk, even if the assistant's closing message says the task is done. Common causes:
 

@@ -275,14 +275,14 @@ def _cmd_list(db, args):
     _preview = lambda s, n: s.get("preview", "")[:n]  # noqa: E731
     _ago = lambda s: _relative_time(s.get("last_active"))  # noqa: E731
     layouts = {  # (has_ws, has_titles): header, rule width, row formatter
-        (True, True): (f"{'Title':<28} {'Workspace':<18} {'Last Active':<13} {'ID'}", 110,
-                       lambda s: f"{_title(s, 26):<28} {_ws(s):<18} {_ago(s):<13} {s['id']}"),
-        (True, False): (f"{'Preview':<38} {'Workspace':<18} {'Last Active':<13} {'Src':<6} {'ID'}", 100,
-                        lambda s: f"{_preview(s, 36):<38} {_ws(s):<18} {_ago(s):<13} {s['source']:<6} {s['id']}"),
-        (False, True): (f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}", 110,
-                        lambda s: f"{_title(s, 30):<32} {_preview(s, 38):<40} {_ago(s):<13} {s['id']}"),
-        (False, False): (f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}", 95,
-                         lambda s: f"{_preview(s, 48):<50} {_ago(s):<13} {s['source']:<6} {s['id']}"),
+        (True, True): (f"{'Title':<28} {'Workspace':<18} {'Last Active':<22} {'ID'}", 120,
+                       lambda s: f"{_title(s, 26):<28} {_ws(s):<18} {_ago(s):<22} {s['id']}"),
+        (True, False): (f"{'Preview':<38} {'Workspace':<18} {'Last Active':<22} {'Src':<6} {'ID'}", 110,
+                        lambda s: f"{_preview(s, 36):<38} {_ws(s):<18} {_ago(s):<22} {s['source']:<6} {s['id']}"),
+        (False, True): (f"{'Title':<32} {'Preview':<40} {'Last Active':<22} {'ID'}", 120,
+                        lambda s: f"{_title(s, 30):<32} {_preview(s, 38):<40} {_ago(s):<22} {s['id']}"),
+        (False, False): (f"{'Preview':<50} {'Last Active':<22} {'Src':<6} {'ID'}", 105,
+                         lambda s: f"{_preview(s, 48):<50} {_ago(s):<22} {s['source']:<6} {s['id']}"),
     }
     header, rule, fmt = layouts[(has_ws, has_titles)]
     print(header + "\n" + "─" * rule)
@@ -724,10 +724,10 @@ def _cmd_pinned(db, args):
     if not pinned_rows:
         print("No pinned sessions. Pin one with: hermes sessions pin <session_id>")
         return
-    print(f"{'Title':<32} {'Last Active':<13} {'Src':<9} {'ID'}\n" + "─" * 100)
+    print(f"{'Title':<32} {'Last Active':<22} {'Src':<9} {'ID'}\n" + "─" * 110)
     for s in pinned_rows:
         title = (s.get("title") or s.get("preview", "") or "—")[:30]
-        print(f"{title:<32} {_relative_time(s.get('last_active')):<13} {(s.get('source') or '-'):<9} {s['id']}")
+        print(f"{title:<32} {_relative_time(s.get('last_active')):<22} {(s.get('source') or '-'):<9} {s['id']}")
 
 
 def _cmd_retitle_skills(db, args):

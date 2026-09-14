@@ -2006,6 +2006,24 @@ def _managed_summary_call(agent, api_request_id: str, request, callback, *, retr
     )
 
 
+def _summary_reasoning_extra_body(agent) -> dict:
+    """OpenRouter-safe extra_body.reasoning for the iteration-limit summary call.
+
+    The main tool loop clamps Hermes internal ultra level through
+    ChatCompletionsTransport (#89503). This path calls
+    chat.completions.create() directly and used to forward ultra
+    verbatim, which OpenRouter rejects with HTTP 400.
+    """
+    from agent.transports.chat_completions import _reasoning_config_for_model
+    raw = agent.reasoning_config if agent.reasoning_config is not None else {"enabled": True, "effort": "medium"}
+    clamped = _reasoning_config_for_model(getattr(agent, "model", "") or "", raw)
+    if not isinstance(clamped, dict):
+        return {"enabled": True, "effort": "medium"}
+    effort = (clamped.get("effort", "medium") or "medium")
+    off = clamped.get("enabled") is False or effort == "none"
+    return {"enabled": not off, "effort": "none" if off else effort}
+
+
 def _iteration_summary_chat_kwargs(agent, api_messages: list) -> dict:
     """chat.completions.create kwargs for the summary, mirroring ChatCompletionsTransport.build_kwargs()."""
     try:
@@ -2021,7 +2039,7 @@ def _iteration_summary_chat_kwargs(agent, api_messages: list) -> dict:
 
     extra_body = {}
     if not is_lmstudio and agent._supports_reasoning_extra_body():
-        extra_body["reasoning"] = agent.reasoning_config if agent.reasoning_config is not None else {"enabled": True, "effort": "medium"}
+        extra_body["reasoning"] = _summary_reasoning_extra_body(agent)
     if "nousresearch" in agent._base_url_lower:
         from agent.portal_tags import nous_portal_tags
         extra_body["tags"] = nous_portal_tags()

@@ -235,9 +235,9 @@ def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: 
 
 def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False) -> dict | None:
     """Apply ``display.busy_input_mode`` to a mid-turn prompt instead of rejecting it (rejection made clients busy-retry
-    and drop sends): ``interrupt`` (default) → redirect, falling back to hard interrupt + queue; ``queue`` → queue only;
-    ``steer`` → inject after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
-    after" message must NEVER become a live correction."""
+    and drop sends): ``queue`` (default) → enqueue for the next turn; ``steer`` → inject after the current atomic
+    action; ``interrupt`` → redirect, falling back to hard interrupt + queue. ``queued=True`` (client queue drain)
+    forces queue mode: a "run after" message must NEVER become a live correction."""
     mode = "queue" if queued else _load_busy_input_mode()
     agent = session.get("agent")
     with session["history_lock"]:
