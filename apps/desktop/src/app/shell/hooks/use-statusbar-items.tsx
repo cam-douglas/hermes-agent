@@ -285,11 +285,13 @@ export function useStatusbarItems({
   // ticks mid-turn, message.complete after) — no extra RPC, no polling.
   const cacheHit = cacheHitLabel(currentUsage)
   const tokensPerSecond = tokensPerSecondLabel(currentUsage)
+
   const spendTracker = useMemo<StatusbarItem>(() => {
     const spend = gaugeUsage.hourly_cost_usd ?? gaugeUsage.cost_usd
     const limit = gaugeUsage.cost_guard_limit_usd ?? 1
     const active = gaugeUsage.cost_guard_active === true || (spend != null && spend >= limit)
     const label = spend == null ? '$—/hr' : `$${spend.toFixed(2)}/$${limit.toFixed(2)}`
+
     return {
       detail: active ? 'Free fallback active' : 'Paid route active',
       id: 'hourly-spend',

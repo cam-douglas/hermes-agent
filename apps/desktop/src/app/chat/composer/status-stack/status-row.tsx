@@ -119,10 +119,13 @@ export const StatusItemRow = memo(function StatusItemRow({
   const saveTodo = () => {
     const content = draft.trim()
     setEditing(false)
+
     if (!sessionId || !todoKey || !content || content === item.title) {
       setDraft(item.title)
+
       return
     }
+
     void $gateway.get()?.request('todo.update', { session_id: sessionId, id: todoKey, content })
   }
 
@@ -130,6 +133,7 @@ export const StatusItemRow = memo(function StatusItemRow({
     if (!sessionId || !todoKey) {
       return
     }
+
     void $gateway.get()?.request('todo.delete', { session_id: sessionId, id: todoKey })
   }
 
@@ -216,7 +220,10 @@ export const StatusItemRow = memo(function StatusItemRow({
             onChange={event => setDraft(event.target.value)}
             onClick={event => event.stopPropagation()}
             onKeyDown={event => {
-              if (event.key === 'Enter') saveTodo()
+              if (event.key === 'Enter') {
+                saveTodo()
+              }
+
               if (event.key === 'Escape') {
                 setDraft(item.title)
                 setEditing(false)
@@ -225,18 +232,18 @@ export const StatusItemRow = memo(function StatusItemRow({
             value={draft}
           />
         ) : (
-        <span
-          className={cn(
-            'min-w-0 flex-1 truncate text-[0.73rem] leading-4',
-            failed
-              ? 'text-destructive/90'
-              : item.todoStatus && item.todoStatus !== 'in_progress'
-                ? 'text-muted-foreground/75'
-                : 'text-foreground/92'
-          )}
-        >
-          {item.title}
-        </span>
+          <span
+            className={cn(
+              'min-w-0 flex-1 truncate text-[0.73rem] leading-4',
+              failed
+                ? 'text-destructive/90'
+                : item.todoStatus && item.todoStatus !== 'in_progress'
+                  ? 'text-muted-foreground/75'
+                  : 'text-foreground/92'
+            )}
+          >
+            {item.title}
+          </span>
         )}
         {item.type === 'subagent' && item.currentTool && (
           <span className="shrink-0 truncate text-[0.62rem] leading-4 text-muted-foreground/70">

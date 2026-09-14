@@ -1185,9 +1185,6 @@ export function ChatBar({
                     }
                   }}
                   onEdit={beginQueuedEdit}
-                  onSave={() => {
-                    exitQueuedEdit('save')
-                  }}
                   onResume={() => {
                     unparkQueuedPrompts(activeQueueSessionKey)
 
@@ -1196,6 +1193,9 @@ export function ChatBar({
                     if (!busy) {
                       void drainNextQueued()
                     }
+                  }}
+                  onSave={() => {
+                    exitQueuedEdit('save')
                   }}
                   onSendNow={id => void sendQueuedNow(id)}
                   onSteerNow={id => void steerQueuedNow(id)}

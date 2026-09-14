@@ -79,7 +79,6 @@ interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
   card?: boolean
 }
 
-
 // Hover marquee (card title): measure the actual overflow on pointerenter and
 // arm the CSS animation only when there is some — CSS can't detect overflow on
 // its own, and animating a non-overflowing title would wiggle for nothing.
