@@ -3,6 +3,7 @@ import { useStore } from '@nanostores/react'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
+import { ChromeSlot } from '@/contrib/chrome-slot'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { Ear, EarOff, iconSize, Layers3, Loader2, Square, Volume2, VolumeX } from '@/lib/icons'
@@ -110,7 +111,11 @@ export function ComposerControls({
     <div className="ml-auto flex min-w-0 shrink items-center gap-(--composer-control-gap)">
       {minimal ? null : (
         <>
-          {hideModelPill ? null : <ModelPill compact={compactModelPill} disabled={disabled} model={state.model} />}
+          {hideModelPill ? null : (
+            <ChromeSlot id="model-pill">
+              <ModelPill compact={compactModelPill} disabled={disabled} model={state.model} />
+            </ChromeSlot>
+          )}
           {voiceControls}
         </>
       )}

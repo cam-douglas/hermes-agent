@@ -54,6 +54,10 @@ interface LoadOptions {
 /** Live runtime plugins: id -> disposers (unload/reload support). */
 const loaded = new Map<string, (() => void)[]>()
 
+/** Last source that registered without throwing. A bad hot-edit restores this
+ *  instead of leaving the slot empty. */
+const lastGoodSource = new Map<string, string>()
+
 // Matches the specifier of a static `from '…'`, a side-effect `import '…'`, or
 // a dynamic `import('…')` — anchored to import/export syntax so a bare string
 // literal or comment (e.g. `notify('react')`) is never touched.
@@ -179,11 +183,36 @@ export async function loadRuntimePlugin(
 
     const activate = () => {
       // Reload = dispose the previous incarnation, then register fresh.
+      // If register throws, restore the last source that succeeded so a
+      // hot-edit cannot empty the slot.
       unloadRuntimePlugin(plugin.id)
       const disposers: (() => void)[] = []
-      plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose)))
-      loaded.set(plugin.id, disposers)
-      publishPlugin({ ...record, status: 'loaded' })
+
+      try {
+        plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose)))
+        loaded.set(plugin.id, disposers)
+        lastGoodSource.set(plugin.id, source)
+        publishPlugin({ ...record, status: 'loaded' })
+      } catch (error) {
+        disposers.forEach(dispose => {
+          try {
+            dispose()
+          } catch {
+            // Partial register cleanup must not hide the register failure.
+          }
+        })
+
+        const fallback = lastGoodSource.get(plugin.id)
+
+        if (fallback && fallback !== source) {
+          notifyError(error, `Plugin "${origin}" failed; restored last-known-good`)
+          void loadRuntimePlugin(fallback, origin, options)
+
+          return
+        }
+
+        throw error
+      }
     }
 
     publishPlugin({ ...record, status: 'disabled' }, { activate, deactivate: () => unloadRuntimePlugin(plugin.id) })

@@ -27,6 +27,8 @@ interface TerminalInstanceProps {
   onAddSelectionToChat: (text: string, label?: string) => void
   restoreCwd?: string
   reviveBuffer?: string
+  cursorChatId?: string
+  resumeOnCreate?: boolean
 }
 
 /** One persistent xterm+PTY. Every open tab stays mounted (so its shell and
@@ -37,7 +39,9 @@ export function TerminalInstance({
   cwd,
   onAddSelectionToChat,
   restoreCwd,
-  reviveBuffer
+  reviveBuffer,
+  cursorChatId,
+  resumeOnCreate
 }: TerminalInstanceProps) {
   const { t } = useI18n()
 
@@ -48,6 +52,8 @@ export function TerminalInstance({
     onAddSelectionToChat,
     restoreCwd,
     reviveBuffer,
+    cursorChatId,
+    resumeOnCreate,
     onShell: shell => reportTerminalShell(id, shell)
   })
 

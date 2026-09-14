@@ -12,8 +12,9 @@ import nodePty from 'node-pty'
 
 import { resolveTerminalConnectionForSender } from './connection-apply'
 import { ensureSpawnHelperExecutable } from './spawn-helper-perms'
-import { buildInteractiveSshArgs } from './ssh-connection'
+import { buildExecArgs, buildInteractiveSshArgs } from './ssh-connection'
 import { createTerminalOutputGate } from './terminal-output-gate'
+import { buildKillPersistedSessionCommand } from './terminal-persist'
 import { buildWindowsInteractiveCommand } from './windows-remote-lifecycle'
 
 export interface TerminalIpcDeps {
@@ -218,7 +219,34 @@ export function registerTerminalIpc({
     })
   }
 
-  function disposeTerminalSession(id: string) {
+  function sshBinary() {
+    return process.platform === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe')
+      : 'ssh'
+  }
+
+  function killPersistedRemoteSession(sessionInfo) {
+    const persistKey = String(sessionInfo?.persistKey || '').trim()
+
+    if (!persistKey || !sessionInfo?.ssh) {
+      return
+    }
+
+    try {
+      execFile(
+        sshBinary(),
+        buildExecArgs(sessionInfo.ssh, buildKillPersistedSessionCommand(persistKey)),
+        { timeout: 4000 },
+        () => {
+          // Best-effort: tab close should not hang if the remote is gone.
+        }
+      )
+    } catch {
+      // Same — local PTY kill below still detaches the SSH client.
+    }
+  }
+
+  function disposeTerminalSession(id: string, options: { persist?: boolean } = {}) {
     const sessionInfo = terminalSessions.get(id)
 
     if (!sessionInfo) {
@@ -226,6 +254,12 @@ export function registerTerminalIpc({
     }
 
     terminalSessions.delete(id)
+
+    // App quit / SSH reconnect: detach only. tmux on the remote keeps Cursor
+    // running. An explicit tab close kills that named session.
+    if (!options.persist) {
+      killPersistedRemoteSession(sessionInfo)
+    }
 
     try {
       sessionInfo.pty.kill()
@@ -237,18 +271,19 @@ export function registerTerminalIpc({
   }
 
   // SSH teardown: close every pane whose PTY rode the disconnected tunnel.
+  // Persist the remote tmux sessions — reconnect reattaches them.
   function disposeTerminalSessionsForSshScope(scope: string) {
     for (const [id, info] of [...terminalSessions.entries()]) {
       if (info.sshScope === scope) {
-        disposeTerminalSession(id)
+        disposeTerminalSession(id, { persist: true })
       }
     }
   }
 
-  // App shutdown: kill every open PTY before environment teardown.
+  // App shutdown: drop local SSH clients only. Named remote tmux sessions stay.
   function disposeAllTerminalSessions() {
     for (const id of [...terminalSessions.keys()]) {
-      disposeTerminalSession(id)
+      disposeTerminalSession(id, { persist: true })
     }
   }
 
@@ -292,6 +327,9 @@ export function registerTerminalIpc({
     const cwd = safeTerminalCwd(payload?.cwd)
     const cols = Math.max(2, Number.parseInt(String(payload?.cols || 80), 10) || 80)
     const rows = Math.max(2, Number.parseInt(String(payload?.rows || 24), 10) || 24)
+    const persistKey = String(payload?.persistKey || '').trim()
+    const cursorChatId = String(payload?.cursorChatId || '').trim()
+    const resumeOnCreate = Boolean(payload?.resumeOnCreate)
 
     const sshTarget = await resolveTerminalConnectionForSender(event.sender.id, activeSshTerminalTarget, ensureBackend)
 
@@ -303,12 +341,15 @@ export function registerTerminalIpc({
         ? buildWindowsInteractiveCommand(String(payload?.cwd || '').trim())
         : undefined
 
+    const persist =
+      persistKey && remoteState?.remotePlatform !== 'Windows'
+        ? { persistKey, cursorChatId, resumeOnCreate }
+        : undefined
+
     const ptyProcess = remote
       ? nodePty.spawn(
-          process.platform === 'win32'
-            ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe')
-            : 'ssh',
-          buildInteractiveSshArgs(sshTarget.ssh, String(payload?.cwd || '').trim(), undefined, remoteCommand),
+          sshBinary(),
+          buildInteractiveSshArgs(sshTarget.ssh, String(payload?.cwd || '').trim(), undefined, remoteCommand, persist),
           { cols, cwd: app.getPath('home'), env: terminalShellEnv(), name: 'xterm-256color', rows }
         )
       : nodePty.spawn(command, args, { cols, cwd, env: terminalShellEnv(), name: 'xterm-256color', rows })
@@ -331,14 +372,21 @@ export function registerTerminalIpc({
       outputGate,
       pty: ptyProcess,
       webContentsId: event.sender.id,
-      ...(remote ? { sshScope: sshTarget.scope, remoteCwd: String(payload?.cwd || '') } : {})
+      ...(remote
+        ? {
+            sshScope: sshTarget.scope,
+            remoteCwd: String(payload?.cwd || ''),
+            ssh: sshTarget.ssh,
+            ...(persistKey ? { persistKey } : {})
+          }
+        : {})
     })
 
     ptyProcess.onData(data => outputGate.data(data))
     ptyProcess.onExit(({ exitCode, signal }) => {
       outputGate.exit({ code: exitCode, signal: signal == null ? null : String(signal) })
     })
-    event.sender.once('destroyed', () => disposeTerminalSession(id))
+    event.sender.once('destroyed', () => disposeTerminalSession(id, { persist: true }))
 
     return { cwd: remote ? null : cwd, id, shell: remote ? 'ssh' : name }
   })
@@ -391,7 +439,9 @@ export function registerTerminalIpc({
     return sessionInfo.sshScope !== undefined ? null : readProcessCwd(sessionInfo.pty.pid)
   })
 
-  ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
+  ipcMain.handle('hermes:terminal:dispose', (_event, id, options = {}) =>
+    disposeTerminalSession(String(id || ''), { persist: Boolean(options?.persist) })
+  )
 
   return { disposeTerminalSession, disposeTerminalSessionsForSshScope, disposeAllTerminalSessions }
 }

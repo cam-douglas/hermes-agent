@@ -263,6 +263,7 @@ declare global {
       }
       api: <T>(request: HermesApiRequest) => Promise<T>
       notify: (payload: HermesNotification) => Promise<boolean>
+      playChime?: () => Promise<boolean>
       requestMicrophoneAccess: () => Promise<boolean>
       /** read_window_below tool: metadata for the OS window directly underneath this one (never pixels). */
       readWindowBelow?: () => Promise<{
@@ -413,6 +414,10 @@ declare global {
       // resolved by Electron independently of the connected backend (#66899).
       // Created on demand; returns the normalized absolute path.
       desktopPluginsRoot?: () => Promise<string>
+      /** Local `<HERMES_HOME>/desktop-chrome` overlay (CSS + last-known-good). */
+      desktopChromeRoot?: () => Promise<string>
+      desktopChromeSnapshot?: () => Promise<{ ok: boolean; saved: string[] }>
+      desktopChromeRollback?: () => Promise<{ ok: boolean; restored: string[] }>
       /** LOCAL `<HERMES_HOME>/logs` (profile-aware) — error card "Open Logs". */
       logsRoot?: () => Promise<string>
       /** Re-copy unified packages' desktop halves into the app-level root; returns touched paths. */
@@ -492,11 +497,18 @@ declare global {
          *  only; null on Windows or when unavailable). Used to reopen a tab
          *  where the user last `cd`'d. */
         cwd: (id: string) => Promise<string | null>
-        dispose: (id: string) => Promise<boolean>
+        dispose: (id: string, options?: { persist?: boolean }) => Promise<boolean>
         onData: (id: string, callback: (payload: string) => void) => () => void
         onExit: (id: string, callback: (payload: HermesTerminalExit) => void) => () => void
         resize: (id: string, size: { cols: number; rows: number }) => Promise<boolean>
-        start: (options?: { cols?: number; cwd?: string; rows?: number }) => Promise<HermesTerminalSession>
+        start: (options?: {
+          cols?: number
+          cwd?: string
+          rows?: number
+          persistKey?: string
+          cursorChatId?: string
+          resumeOnCreate?: boolean
+        }) => Promise<HermesTerminalSession>
         write: (id: string, data: string) => Promise<boolean>
       }
       reachPreviewUrl?: (url: string) => Promise<string>

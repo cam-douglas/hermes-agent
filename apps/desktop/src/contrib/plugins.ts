@@ -13,6 +13,8 @@
  *    — the agent's/user's doors, watched + hot-reloaded by the runtime loader.
  */
 
+import { watchDesktopChrome } from '@/lib/desktop-chrome'
+
 import { createPluginContext, type HermesPlugin } from './plugin'
 import { pluginActive, publishPlugin } from './plugins-store'
 import { watchRuntimePlugins } from './runtime-loader'
@@ -81,4 +83,5 @@ export function discoverBundledPlugins(): void {
   // The SELF-MAINTAINING disk door (fs-watched hot reloads, slow folder
   // reconciliation) — the runtime loader pipeline's real, shipping consumer.
   watchRuntimePlugins()
+  watchDesktopChrome()
 }

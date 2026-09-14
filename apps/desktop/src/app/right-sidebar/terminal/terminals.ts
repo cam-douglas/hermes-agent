@@ -29,6 +29,11 @@ export interface TerminalEntry {
    *  revived — a fresh shell starts beneath the restored buffer. Captured live
    *  for user tabs only; agent mirrors stay runtime-only. */
   reviveBuffer?: string
+  /** Cursor CLI chat id last used in this pane (`agent --resume <id>`). */
+  cursorChatId?: string
+  /** True for tabs loaded from disk this launch. Those remounts reattach tmux
+   *  or start `agent --resume` / `--continue`. Tabs created this session do not. */
+  restored?: boolean
   /** `user` = interactive PTY shell. `agent` = read-only mirror of an agent
    *  background process (`terminal(background=true)`), keyed by `procId`. */
   kind: 'user' | 'agent'
@@ -41,6 +46,7 @@ interface PersistedTerminalEntry {
   id: string
   restoreCwd?: string
   reviveBuffer?: string
+  cursorChatId?: string
   title: string
 }
 
@@ -67,6 +73,7 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
   const cwd = typeof record.cwd === 'string' ? record.cwd : ''
   const restoreCwd = typeof record.restoreCwd === 'string' && record.restoreCwd ? record.restoreCwd : undefined
   const reviveBuffer = typeof record.reviveBuffer === 'string' ? record.reviveBuffer : undefined
+  const cursorChatId = typeof record.cursorChatId === 'string' && record.cursorChatId.trim() ? record.cursorChatId.trim() : undefined
 
   if (!id) {
     return null
@@ -78,6 +85,7 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
     id,
     ...(restoreCwd ? { restoreCwd } : {}),
     ...(reviveBuffer ? { reviveBuffer } : {}),
+    ...(cursorChatId ? { cursorChatId } : {}),
     title: title || 'Terminal'
   }
 }
@@ -126,6 +134,7 @@ function persistTerminals(list: readonly TerminalEntry[], activeTerminalId: null
       id: term.id,
       ...(term.restoreCwd ? { restoreCwd: term.restoreCwd } : {}),
       ...(term.reviveBuffer ? { reviveBuffer: term.reviveBuffer } : {}),
+      ...(term.cursorChatId ? { cursorChatId: term.cursorChatId } : {}),
       title: term.title
     }))
 
@@ -142,7 +151,7 @@ function persistTerminals(list: readonly TerminalEntry[], activeTerminalId: null
 const restored = loadPersistedTerminals()
 
 export const $terminals = atom<readonly TerminalEntry[]>(
-  restored.terminals.map(term => ({ ...term, kind: 'user' as const }))
+  restored.terminals.map(term => ({ ...term, kind: 'user' as const, restored: true }))
 )
 export const $activeTerminalId = atom<string | null>(restored.activeTerminalId)
 
@@ -215,6 +224,14 @@ export function openAgentTerminal(procId: string, title: string): void {
 export function ensureTerminal(): void {
   if ($terminals.get().length === 0) {
     createTerminal()
+  }
+}
+
+/** Re-open the terminal pane on launch when the last session left user tabs.
+ *  Those tabs remount, reattach their tmux sessions, and resume Cursor. */
+export function revealPersistedTerminals(): void {
+  if ($terminals.get().some(term => term.kind === 'user')) {
+    setTerminalTakeover(true)
   }
 }
 
@@ -360,6 +377,26 @@ export function updateTerminalReviveBuffer(id: string, reviveBuffer: string): vo
 /** Record the shell's latest working directory for a tab so the next launch can
  *  restart the PTY there instead of the original launch dir. User tabs only;
  *  no-ops when the value is empty or unchanged to avoid redundant persistence. */
+/** Remember the Cursor chat this pane last attached so a dead tmux session
+ *  can `agent --resume` the same conversation instead of the global latest. */
+export function updateTerminalCursorChatId(id: string, cursorChatId: string): void {
+  const next = cursorChatId.trim()
+
+  if (!next) {
+    return
+  }
+
+  $terminals.set(
+    $terminals.get().map(term => {
+      if (term.id !== id || term.kind !== 'user' || term.cursorChatId === next) {
+        return term
+      }
+
+      return { ...term, cursorChatId: next }
+    })
+  )
+}
+
 export function updateTerminalRestoreCwd(id: string, restoreCwd: string): void {
   const next = restoreCwd.trim()
 
