@@ -801,15 +801,6 @@ class GatewayShutdownMixin:
         platform_cfg = self.config.platforms.get(platform)
         return platform_cfg is None or bool(platform_cfg.gateway_restart_notification)
 
-    def _notice_allowed(self, platform: Platform, what: str) -> bool:
-        """``_restart_notification_allowed`` with the INFO suppression line for shutdown notices."""
-        if self._restart_notification_allowed(platform):
-            return True
-        logger.info(
-            "Shutdown notification suppressed for %s: %s has gateway_restart_notification=false", what, platform.value,
-        )
-        return False
-
     async def _notify_interrupted_cron_jobs(self, job_ids) -> int:
         """Tell the owner of each just-interrupted cron job that its run died; returns notices sent.
 
@@ -877,39 +868,6 @@ class GatewayShutdownMixin:
             logger.info("Shutdown: delivered %d interrupted-cron-job notice(s)", len(notified))
         return len(notified)
 
-    async def _shutdown_notification_target(self, session_key: str):
-        """``(source, platform_str, chat_id, thread_id, profile)``: persisted origin > cached source >
-        parsed key. ``profile`` is the owning profile from the source or the ``agent:<profile>:`` key
-        namespace (``None`` = default) so the notice leaves through that profile's bot."""
-        from gateway.run import _parse_session_key
-        source = None
-        try:
-            if getattr(self, "session_store", None) is not None:
-                await self.async_session_store._ensure_loaded()
-                entry = self.session_store._entries.get(session_key)
-                source = getattr(entry, "origin", None) if entry else None
-        except Exception as e:
-            logger.debug("Failed to load session origin for shutdown notification %s: %s", session_key, e)
-        if source is None:
-            source = self._get_cached_session_source(session_key)
-        if source is not None:
-            return source, source.platform.value, str(source.chat_id), source.thread_id, getattr(source, "profile", None)
-        _parsed = _parse_session_key(session_key)
-        if not _parsed:
-            return None
-        return None, _parsed["platform"], _parsed["chat_id"], _parsed.get("thread_id"), _parsed.get("profile")
-
-    async def _send_shutdown_notice(
-        self, adapter, chat_id: str, msg: str, kind: str, platform_str: str, **send_kwargs
-    ) -> bool:
-        """Send one shutdown notice; True when delivered. Failures are debug-logged, never raised."""
-        where = "home channel " if kind == "home channel" else ""
-        fail_fmt = f"Failed to send shutdown notification to {where}%s:%s: %s"
-        if not await self._send_notice_logged(adapter, chat_id, msg, platform_str, fail_fmt, **send_kwargs):
-            return False
-        logger.info("Sent shutdown notification to %s %s:%s", kind, platform_str, chat_id)
-        return True
-
     @staticmethod
     async def _send_notice_logged(
         adapter, chat_id: str, msg: str, platform_str: str, fail_fmt: str, raise_fmt: Optional[str] = None, **kw
@@ -930,92 +888,14 @@ class GatewayShutdownMixin:
         """Send shutdown/restart notifications to active chats and home channels.
 
         Called at the start of stop() while adapters are connected; send failures never block shutdown.
+
+        Disabled by explicit user preference: the only gateway-lifecycle messages that should reach
+        end users are the "back online" notice (gated by ``gateway_restart_notification``, see
+        ``_send_home_channel_startup_notifications``/``_send_restart_notification``) and the
+        Photon-only unhealthy alert (``_notify_gateway_unhealthy``). A routine restart/shutdown is
+        not, by itself, something the user wants to hear about.
         """
-        restart_source = self._restart_command_source if self._restart_requested else None
-        msg = (
-            "⚠️ Hermes is shutting down — your current task will be interrupted. "
-            "When it is back online, send any message and I'll try to pick up where we left off."
-        )
-        if self._restart_requested:
-            msg = (
-                "⚠️ Hermes is restarting — your current task will be interrupted. "
-                "Send any message after the restart and I'll try to resume where you left off."
-            )
-        restart_key = None
-        if restart_source is not None:
-            with suppress(Exception):
-                restart_key = _notice_target_key(
-                    restart_source.platform.value, restart_source.chat_id, restart_source.thread_id
-                )
-        notified: set[tuple[str, str, Optional[str]]] = set()
-        for session_key in self._snapshot_running_agents():
-            target = await self._shutdown_notification_target(session_key)
-            if target is None:
-                continue
-            source, platform_str, chat_id, thread_id, profile = target
-            dedup_key = _notice_target_key(platform_str, chat_id, thread_id)
-            if dedup_key in notified:
-                continue
-            try:
-                platform = Platform(platform_str)
-                # The session's OWN profile's bot (transport ref → profile map), never a bare
-                # self.adapters hit: under multiplex that is the default bot, so a secondary session's
-                # "Gateway shutting down" would land in the user's chat with the wrong bot.
-                adapter = self._adapter_for_source(source) if source is not None else None
-                if adapter is None:
-                    adapter = self._authorization_adapter(platform, profile)
-                if not adapter:
-                    continue
-                if not self._notice_allowed(platform, "active session"):
-                    continue
-                reply_to_message_id = getattr(source, "message_id", None)
-                if reply_to_message_id is None and restart_key == dedup_key:
-                    reply_to_message_id = getattr(restart_source, "message_id", None)
-                metadata = self._thread_metadata_for_target(
-                    platform, chat_id, thread_id, chat_type=getattr(source, "chat_type", None),
-                    reply_to_message_id=reply_to_message_id, adapter=adapter,
-                )
-            except Exception as e:
-                logger.debug("Failed to send shutdown notification to %s:%s: %s", platform_str, chat_id, e)
-                continue
-            if await self._send_shutdown_notice(adapter, chat_id, msg, "active chat", platform_str, metadata=metadata):
-                notified.add(dedup_key)
-        if self._restart_requested and restart_source is not None:
-            logger.debug("Skipping home-channel shutdown notifications for in-chat restart")
-            return
-        # A quiet drain (routine fleet auto-update) suppresses ONLY the home-channel broadcast; per-session
-        # pings above stay. Current-epoch marker only; a failing check fails toward the louder behaviour.
-        with _log_suppressed(logging.DEBUG, "drain_notification_suppressed check failed: %s"):
-            from gateway.drain_control import drain_notification_suppressed
-            if drain_notification_suppressed():
-                logger.info(
-                    "Home-channel shutdown broadcast suppressed by drain marker (suppress_notification=true)"
-                )
-                return
-        # Snapshot adapters: adapter.send() can hit a fatal path (_handle_fatal) that pops the adapter
-        # from self.adapters -> ``RuntimeError: dictionary changed size during iteration``.
-        for platform, adapter in list(self.adapters.items()):
-            home = self.config.get_home_channel(platform)
-            if not home or not home.chat_id:
-                continue
-            if not self._notice_allowed(platform, "home channel"):
-                continue
-            dedup_key = _notice_target_key(platform.value, home.chat_id, home.thread_id)
-            if dedup_key in notified:
-                continue
-            try:
-                metadata = self._thread_metadata_for_target(platform, home.chat_id, home.thread_id, adapter=adapter)
-            except Exception as e:
-                logger.debug(
-                    "Failed to send shutdown notification to home channel %s:%s: %s", platform.value, home.chat_id, e,
-                )
-                continue
-            # Home channels omit ``metadata=`` when empty (adapter doubles may not accept the kwarg).
-            if await self._send_shutdown_notice(
-                adapter, str(home.chat_id), msg, "home channel", platform.value,
-                **({"metadata": metadata} if metadata else {}),
-            ):
-                notified.add(dedup_key)
+        return
 
     # Agent finalization / resource cleanup
     @staticmethod

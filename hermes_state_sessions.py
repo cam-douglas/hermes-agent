@@ -847,8 +847,12 @@ class SessionSessionsMixin:
         ) > 0
 
     def set_session_archived(self, session_id: str, archived: bool) -> bool:
-        """Soft-hide (or unhide) a session and its compression lineage; messages are kept."""
-        return self._set_lineage_column("archived", session_id, int(archived))
+        """Soft-hide (or unhide) a session and its compression lineage; messages are kept.
+        Stamps/clears archived_at so callers can tell 'archived when' from the bare bool."""
+        ok = self._set_lineage_column("archived", session_id, int(archived))
+        if ok:
+            self._set_lineage_column("archived_at", session_id, time.time() if archived else None)
+        return ok
 
     # Accidental end reasons recovery treats as resumable (also interpolated into
     # the recovery/promotion SQL so literals cannot drift).

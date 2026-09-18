@@ -1553,6 +1553,44 @@ class GatewayTurnMixin:
         display_reasoning = escape_code_fences_for_display(display_reasoning)
         return f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
 
+    @staticmethod
+    def _hmwa_format_archived_when(archived_at) -> str:
+        try:
+            age_s = time.time() - float(archived_at)
+        except (TypeError, ValueError):
+            return "unknown"
+        if age_s < 3600:
+            return f"{max(1, int(age_s // 60))}m ago"
+        if age_s < 86400:
+            return f"{int(age_s // 3600)}h ago"
+        return f"{int(age_s // 86400)}d ago"
+
+    async def _hmwa_prepend_archive_notice(self, source) -> Optional[str]:
+        """If this identity (source.platform.value, canonical user id) has a 'pending' (not yet
+        shown) archive-restore notice, marks it 'awaiting_reply' and returns the reminder block to
+        prepend to the outgoing reply. Returns None (the common case) when nothing is pending."""
+        from gateway.session import _canonical_participant
+        if not source.platform:
+            return None
+        user_id = _canonical_participant(source) or ""
+        platform = source.platform.value
+        db = self._session_db
+        notice = await db.peek_pending_archive_notice(platform, user_id)
+        if notice is None or notice["status"] != "pending":
+            return None
+        await db.mark_archive_notice_shown(platform, user_id)
+        lines = ["While you were away, I auto-archived some inactive sessions:", ""]
+        for e in notice["entries"]:
+            when = self._hmwa_format_archived_when(e.get("archived_at"))
+            lines.append(f"`{e['code']}` — [{e['source']}] {e['title']} (archived {when})")
+        lines += [
+            "",
+            "Reply with a code (e.g. `3C`) to restore that one, 'approve' to keep them all "
+            "archived, 'deny' to restore all of the above, or just ignore this — doing nothing "
+            "also keeps them archived.",
+        ]
+        return "\n".join(lines)
+
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; off by default
         (display.runtime_footer.enabled=false)."""
@@ -1838,7 +1876,7 @@ class GatewayTurnMixin:
 
     async def _hmwa_deliver_turn_response(
         self, event, source, session_entry, session_key, run_generation,
-        agent_result, agent_messages, response, _footer_line, _intentional_silence,
+        agent_result, agent_messages, response, _footer_line, _archive_notice, _intentional_silence,
     ):
         """Final delivery decisions: intentional silence, voice reply, streamed-turn media/footer.
         Returns the text for the adapter to send, or ``None`` when already delivered."""
@@ -1862,7 +1900,12 @@ class GatewayTurnMixin:
         if agent_result.get("already_sent") and not agent_result.get("failed"):
             if response and adapter:
                 await self._deliver_media_from_response(response, event, adapter)
-            # Streaming delivered the body, but the footer was held back (`not already_sent` gate).
+            # Streaming delivered the body, but the notice/footer were held back (`not already_sent` gate).
+            if _archive_notice and adapter:
+                try:
+                    await adapter.send(source.chat_id, _archive_notice, metadata=self._event_thread_metadata(event, source))
+                except Exception as _e:
+                    logger.debug("trailing archive-notice send failed: %s", _e)
             if _footer_line and adapter:
                 try:
                     await adapter.send(source.chat_id, _footer_line, metadata=self._event_thread_metadata(event, source))
@@ -2131,8 +2174,11 @@ class GatewayTurnMixin:
                 persist_user_display_kind=prepared.persist_user_display_kind,
             )
             response = self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence)
+            _archive_notice = await self._hmwa_prepend_archive_notice(source)
             _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
-            # Streaming already delivered the body: the footer goes out as a trailing send instead.
+            # Streaming already delivered the body: the notice/footer go out as trailing sends instead.
+            if _archive_notice and response and not agent_result.get("already_sent") and not _intentional_silence:
+                response = f"{_archive_notice}\n\n{response}"
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
             await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
@@ -2154,7 +2200,7 @@ class GatewayTurnMixin:
             )
             return await self._hmwa_deliver_turn_response(
                 event, source, session_entry, session_key, run_generation,
-                agent_result, agent_messages, response, _footer_line, _intentional_silence,
+                agent_result, agent_messages, response, _footer_line, _archive_notice, _intentional_silence,
             )
 
         except Exception as e:

@@ -952,6 +952,35 @@ def _cmd_repair_routing(db, args):
     print(f"\nRepaired {repaired} of {len(adoptable)} session(s).")
 
 
+def _cmd_force_archive_all(db, args):
+    """ONE-TIME: force-archive every currently open (non-pinned, unless --include-pinned) session
+    system-wide right now, bypassing the idle threshold, and record a restore notice per
+    (source, user_id) exactly like the 24h idle sweep does — so every affected user sees the same
+    reminder/restore flow on their next message. Never wired into a schedule; this is explicit,
+    human-invoked, and one-shot."""
+    include_pinned = getattr(args, "include_pinned", False)
+    open_count = db.session_count()  # default filters already exclude archived
+    if not getattr(args, "yes", False):
+        scope = "ALL" if include_pinned else "ALL non-pinned"
+        if not _confirm_prompt(
+            f"This will force-archive {scope} {open_count} currently open session(s) "
+            f"system-wide, for every user on every platform, right now. Type 'y' to continue: "
+        ):
+            print("Aborted.")
+            return
+    from gateway.archive_notify import record_archive_notices
+    archived = db.force_archive_all_open_sessions(
+        exclude_pinned=not include_pinned, exclude_canonical_bot_chat=not include_pinned,
+    )
+    notified = record_archive_notices(db, archived)
+    scope_desc = "every open session" if include_pinned else "every open, non-pinned session"
+    print(
+        f"Force-archived {scope_desc}. {len(archived)} of them had a known "
+        f"user identity and were grouped into restore notices across {notified} identit(y/ies); "
+        f"each of those users will see a reminder + restore prompt on their next reply."
+    )
+
+
 def _cmd_stats(db, args):
     print(f"Total sessions: {db.session_count()}\nTotal messages: {db.message_count()}")
     for src in ("cli", "telegram", "discord", "whatsapp", "slack"):
@@ -972,6 +1001,7 @@ _DB_HANDLERS = {
     "retitle-skills": _cmd_retitle_skills, "browse": _cmd_browse, "optimize": _cmd_optimize,
     "clean-markers": _cmd_clean_markers, "optimize-storage": _cmd_optimize_storage,
     "repair-routing": _cmd_repair_routing, "stats": _cmd_stats,
+    "force-archive-all": _cmd_force_archive_all,
 }
 
 

@@ -743,6 +743,46 @@ class GatewayNotificationsMixin:
         finally:
             notify_path.unlink(missing_ok=True)
 
+    async def _notify_gateway_unhealthy(self, reason: str) -> None:
+        """Alert the Photon home channel that the gateway is stuck in an unrecoverable state
+        (e.g. the restart-loop breaker tripped). Unlike the routine restart/online notices this is
+        NOT gated by ``gateway_restart_notification`` -- it's the one alert meant to always reach
+        the user, precisely because it means normal restarts aren't fixing things on their own.
+        Debounced to at most once per hour so a genuine crash loop doesn't spam on every boot
+        attempt; best-effort, never raises."""
+        from gateway.delivery import resolve_delivery_transport
+        from gateway.run import _hermes_home
+        marker = _hermes_home / ".gateway_unhealthy_notified.json"
+        try:
+            last = json.loads(marker.read_text(encoding="utf-8")).get("ts", 0)
+            if time.time() - float(last) < 3600:
+                return
+        except Exception:
+            pass
+        try:
+            platform = Platform("photon")
+        except Exception:
+            logger.warning("Gateway unhealthy (%s) but Photon is not a registered platform.", reason)
+            return
+        home = self.config.get_home_channel(platform)
+        if not home or not home.chat_id:
+            logger.warning("Gateway unhealthy (%s) but no Photon home channel is configured to alert.", reason)
+            return
+        transport = resolve_delivery_transport(platform, self.config, self.adapters)
+        if transport is None:
+            logger.warning("Gateway unhealthy (%s) but no live Photon transport to alert through.", reason)
+            return
+        message = (
+            f"🛑 Hermes gateway is unhealthy and could not recover automatically: {reason}. "
+            "Manual intervention is needed."
+        )
+        sent = await self._send_home_channel_message(
+            platform, home, transport, message, "Gateway-unhealthy alert failed for %s:%s: %s",
+        )
+        if sent:
+            with suppress(Exception):
+                marker.write_text(json.dumps({"ts": time.time(), "reason": reason}), encoding="utf-8")
+
     def _home_channel_transports(self):
         """Yield ``(platform, platform_cfg, home, transport)`` for every home channel with a live transport."""
         from gateway.delivery import resolve_delivery_transport
