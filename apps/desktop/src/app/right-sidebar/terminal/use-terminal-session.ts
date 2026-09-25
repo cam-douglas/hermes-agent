@@ -31,7 +31,16 @@ import { registerTerminalContextMenu } from './terminal-context-menu'
 import { announceTerminalBell, isNotificationOsc9 } from './terminal-bell'
 import { shouldApplyTerminalFit, type TerminalSize } from './terminal-fit'
 import { prepareTerminalFontFamily } from './terminal-font'
-import { shouldFreezeTerminalFitForWheel } from './terminal-wheel'
+import {
+  createTuiWheelDispatcher,
+  inkPageKey,
+  isCursorChromeForWheel,
+  isTuiTitleForWheel,
+  nextTuiWheelLatch,
+  shouldFreezeTerminalFitForWheel,
+  shouldSendTuiWheelToPty,
+  tuiXtermScrollback
+} from './terminal-wheel'
 import { closeTerminal, updateTerminalRestoreCwd, updateTerminalReviveBuffer } from './terminals'
 import { useTerminalFontController } from './use-terminal-font'
 
@@ -443,6 +452,7 @@ export function useTerminalSession({
   const [selection, setSelection] = useState('')
   const [selectionStyle, setSelectionStyle] = useState<CSSProperties | null>(null)
   const [shellName, setShellName] = useState('shell')
+  const tuiScrollRef = useRef(Boolean(resumeOnCreate || cursorChatId))
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
@@ -790,6 +800,107 @@ export function useTerminalSession({
       host.removeEventListener('wheel', onWheel, true)
     })
 
+    let windowTitle = ''
+    // Sticky for Cursor/resume tabs. Prefer Page Up over xterm history even if
+    // OSC title briefly says zsh — scrollback is 0 in TUI and scrollPages no-ops.
+    let tuiLatched = Boolean(resumeOnCreate || cursorChatId)
+    let cursorSticky = Boolean(resumeOnCreate || cursorChatId)
+    tuiScrollRef.current = true
+    const syncTuiViewport = (chrome = '', allowUnlatch = !cursorSticky) => {
+      if (isCursorChromeForWheel(chrome) || isTuiTitleForWheel(windowTitle) || resumeOnCreate || cursorChatId) {
+        cursorSticky = true
+        tuiLatched = true
+      }
+
+      tuiLatched = cursorSticky || nextTuiWheelLatch(tuiLatched, term.buffer.active.type, windowTitle, chrome, allowUnlatch)
+      const isTui =
+        cursorSticky || shouldSendTuiWheelToPty(term.buffer.active.type, windowTitle, false, tuiLatched, allowUnlatch)
+      tuiScrollRef.current = isTui || Boolean(resumeOnCreate || cursorChatId)
+      const nextScrollback = tuiXtermScrollback(tuiScrollRef.current)
+
+      if (term.options.scrollback !== nextScrollback) {
+        term.options.scrollback = nextScrollback
+      }
+
+      if (tuiScrollRef.current) {
+        term.scrollToBottom()
+      }
+    }
+
+    const titleDisposable = term.onTitleChange(next => {
+      windowTitle = next
+      syncTuiViewport()
+    })
+    cleanup.push(() => titleDisposable.dispose())
+
+    let pixelCarry = 0
+    const wheel = createTuiWheelDispatcher({
+      getBufferType: () => term.buffer.active.type,
+      getHost: () => host,
+      getLatched: () => tuiLatched,
+      getPixelCarry: () => pixelCarry,
+      getSessionId: () => sessionIdRef.current,
+      getTitle: () => windowTitle,
+      isSticky: () => cursorSticky || Boolean(resumeOnCreate || cursorChatId) || tuiScrollRef.current,
+      scrollToBottom: () => term.scrollToBottom(),
+      setLatched: value => {
+        tuiLatched = value
+      },
+      setPixelCarry: value => {
+        pixelCarry = value
+      },
+      write: (id, data) => {
+        lastWheelAt = Date.now()
+        void terminalApi.write(id, data)
+      }
+    })
+    const sendTuiWheel = (event: WheelEvent) => {
+      lastWheelAt = Date.now()
+      syncTuiViewport('', false)
+
+      return wheel.send(event)
+    }
+    const onWindowWheel = (event: WheelEvent) => {
+      lastWheelAt = Date.now()
+      syncTuiViewport('', false)
+      wheel.onWindowWheel(event)
+    }
+
+    window.addEventListener('wheel', onWindowWheel, { capture: true, passive: false })
+    host.addEventListener('wheel', sendTuiWheel, { capture: true, passive: false })
+    const onPageKey = (event: KeyboardEvent) => {
+      const active = document.activeElement
+      if (!(active instanceof Node) || !host.contains(active)) {
+        return
+      }
+
+      if (event.key !== 'PageUp' && event.key !== 'PageDown') {
+        return
+      }
+
+      if (!tuiScrollRef.current) {
+        return
+      }
+
+      event.preventDefault()
+      event.stopPropagation()
+      lastWheelAt = Date.now()
+      syncTuiViewport('', false)
+      const id = sessionIdRef.current
+
+      if (id) {
+        void terminalApi.write(id, inkPageKey(event.key === 'PageUp' ? -1 : 1))
+      }
+    }
+    window.addEventListener('keydown', onPageKey, { capture: true })
+    cleanup.push(() => {
+      window.removeEventListener('wheel', onWindowWheel, true)
+      host.removeEventListener('wheel', sendTuiWheel, true)
+      window.removeEventListener('keydown', onPageKey, true)
+    })
+
+    term.attachCustomWheelEventHandler(event => !sendTuiWheel(event))
+
     const fitAndResize = (visible: boolean) => {
       if (disposed || !host.isConnected || host.clientWidth <= 0 || host.clientHeight <= 0) {
         return
@@ -812,6 +923,7 @@ export function useTerminalSession({
       if (!shouldApplyTerminalFit(proposed, lastSentSize, now, lastFitAt)) {
         return
       }
+
 
       try {
         fit.fit()
@@ -948,6 +1060,7 @@ export function useTerminalSession({
 
           cleanup.push(
             terminalApi.onData(session.id, data => {
+              syncTuiViewport(data)
               armedWrite(data)
               scheduleSnapshot()
             }),
@@ -1036,7 +1149,7 @@ export function useTerminalSession({
       sessionIdRef.current = null
 
       if (id) {
-        void terminalApi.dispose(id, { persist: appTearingDown })
+        void terminalApi.dispose(id, { keepRemote: appTearingDown })
       }
 
       term.dispose()

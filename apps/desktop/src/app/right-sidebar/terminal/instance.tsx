@@ -17,8 +17,10 @@ const INSTANCE_CLASS = 'absolute inset-0 flex flex-col bg-(--ui-terminal-surface
 // xterm host. The screen/viewport overrides matter for the DOM renderer (the
 // WebGL fast-path paints the canvas from ITheme.background instead) — both
 // resolve to the same token, so the two renderers can't disagree.
+// Hide xterm's native scrollbar: Cursor transcript scroll is Page Up/Down →
+// tmux copy-mode history (or Ink U() on the PTY), not xterm viewport history.
 const HOST_CLASS =
-  'h-full min-h-0 overflow-hidden text-(--ui-text-secondary) [&_.xterm]:h-full [&_.xterm-screen]:bg-(--ui-terminal-surface-background)! [&_.xterm-viewport]:bg-(--ui-terminal-surface-background)!'
+  'h-full min-h-0 overflow-hidden text-(--ui-text-secondary) [&_.xterm]:h-full [&_.xterm-screen]:bg-(--ui-terminal-surface-background)! [&_.xterm-viewport]:bg-(--ui-terminal-surface-background)! [&_.xterm-viewport]:overflow-hidden!'
 
 interface TerminalInstanceProps {
   id: string

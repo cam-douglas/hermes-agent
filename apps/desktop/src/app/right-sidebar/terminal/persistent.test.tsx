@@ -16,7 +16,8 @@ vi.mock('../store', async () => ({
 
 vi.mock('./terminals', () => ({
   ensureTerminal: vi.fn(),
-  revealPersistedTerminals: vi.fn()
+  restorePersistedTerminalPane: () => false,
+  shouldRestoreTerminalPane: () => false
 }))
 
 vi.mock('./workspace', () => ({

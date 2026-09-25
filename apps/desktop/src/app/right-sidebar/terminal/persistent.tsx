@@ -3,7 +3,7 @@ import { atom } from 'nanostores'
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { isElementInHiddenPane, PANE_HIDDEN_ATTR } from '@/components/pane-shell/pane-visibility'
-import { $layoutTree } from '@/components/pane-shell/tree/store'
+import { $layoutTree, revealTreePane } from '@/components/pane-shell/tree/store'
 import { markRightPanePerf } from '@/debug/right-pane-events'
 import { createRendererLoopPauseController } from '@/lib/renderer-loop-pause'
 import { $paneStates } from '@/store/panes'
@@ -11,7 +11,7 @@ import { $paneStates } from '@/store/panes'
 import { $terminalTakeover } from '../store'
 
 import { stabilizeOverlayRect, type OverlayRect } from './overlay-rect'
-import { ensureTerminal, revealPersistedTerminals } from './terminals'
+import { ensureTerminal, restorePersistedTerminalPane } from './terminals'
 import { TerminalWorkspace } from './workspace'
 
 /**
@@ -70,7 +70,9 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
-    revealPersistedTerminals()
+    if (restorePersistedTerminalPane()) {
+      revealTreePane('terminal')
+    }
   }, [])
 
   useEffect(() => {
