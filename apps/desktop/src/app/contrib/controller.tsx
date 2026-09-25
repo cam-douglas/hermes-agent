@@ -41,8 +41,8 @@ import { Slot } from '@/contrib/react/slot'
 import { registry } from '@/contrib/registry'
 import { discoverRuntimePlugins } from '@/contrib/runtime-loader'
 import { LocalizedTabTitle, translateNow } from '@/i18n'
-import { reloadDesktopChrome, rollbackDesktopChrome } from '@/lib/desktop-chrome'
 import { NEW_SESSION_TITLE, sessionTitle as storedSessionTitle } from '@/lib/chat-runtime'
+import { reloadDesktopChrome, rollbackDesktopChrome } from '@/lib/desktop-chrome'
 import {
   Download,
   FileText,

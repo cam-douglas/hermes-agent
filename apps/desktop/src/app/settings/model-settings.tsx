@@ -1321,8 +1321,8 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
                       }
                       provider={providers.find(row => row.slug === slot.provider)}
                       providerSlug={slot.provider}
-                      value={slot.model}
                       searchable
+                      value={slot.model}
                     />
                     <Button
                       disabled={currentMoaPreset.reference_models.length <= 1 || applying}
@@ -1408,8 +1408,8 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
                     }
                     provider={providers.find(row => row.slug === currentMoaPreset.aggregator.provider)}
                     providerSlug={currentMoaPreset.aggregator.provider}
-                    value={currentMoaPreset.aggregator.model}
                     searchable
+                    value={currentMoaPreset.aggregator.model}
                   />
                 </div>
               }

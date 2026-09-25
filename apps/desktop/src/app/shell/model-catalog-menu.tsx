@@ -26,8 +26,8 @@ import { useI18n } from '@/i18n'
 import { isSubmitEnter } from '@/lib/ime'
 import { catalogProviderMatches, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
-import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { usePickerFilterCapture } from '@/lib/picker-typeahead'
+import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { foldIncludes, normalize } from '@/lib/text'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -481,7 +481,6 @@ export function ModelCatalogMenu({
     <>
       <DropdownMenuSearch
         aria-label={copy.search}
-        ref={searchRef}
         onKeyDown={event => {
           // Claim arrows and Enter from Radix so DOM focus stays in the input
           // and Enter commits the highlighted row without a DownArrow first.
@@ -500,6 +499,7 @@ export function ModelCatalogMenu({
           setKbOverride(null)
         }}
         placeholder={slugEntry ? copyPicker.customModelPlaceholder : copy.search}
+        ref={searchRef}
         ref={searchRef}
         value={search}
       />

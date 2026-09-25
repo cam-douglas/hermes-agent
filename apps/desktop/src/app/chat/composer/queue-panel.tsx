@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
 import { type Translations, useI18n } from '@/i18n'
-import { CornerDownLeft, iconSize, Pencil, Save, SteeringWheel, Trash2 } from '@/lib/icons'
+import { CornerDownLeft, iconSize, Pencil, Save, SteeringWheel } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { isSteerableEntry, type QueuedPromptEntry } from '@/store/composer-queue'
 

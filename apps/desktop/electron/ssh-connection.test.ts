@@ -192,11 +192,13 @@ test('buildInteractiveSshArgs single-quotes a cwd with quotes safely', () => {
 
 test('buildInteractiveSshArgs wraps a persisted pane in a named tmux session', () => {
   const conn = { user: 'me', host: 'box', port: 22, keyPath: '', controlPath: '/tmp/x.sock' }
+
   const args = buildInteractiveSshArgs(conn, '/home/me', 15000, undefined, {
     persistKey: 'term-one',
     resumeOnCreate: true,
     cursorChatId: 'chat-1'
   })
+
   const remoteCmd = args[args.length - 1]
 
   assert.match(remoteCmd, /HERMES_TERM='h-term-one'/)
@@ -899,10 +901,12 @@ test('buildInteractiveSshArgs inserts -- before the destination', () => {
 
 test('buildInteractiveSshArgs wraps a persisted pane in a named Sydney tmux session', () => {
   const conn = { user: 'me', host: 'box', port: 22, keyPath: '', controlPath: '/tmp/x.sock' }
+
   const args = buildInteractiveSshArgs(conn, '/home/me', 15000, undefined, {
     persistKey: 'term-one',
     resumeOnCreate: true
   })
+
   const remoteCmd = args[args.length - 1]
   assert.match(remoteCmd, /HERMES_TERM='h-term-one'/)
   assert.match(remoteCmd, /Australia\/Sydney/)
