@@ -316,6 +316,7 @@ import {
 import { runNativeLogin } from './native-oauth-login'
 import { loadNativeTokenSet, type NativeTokenStoreIo, persistNativeTokenSet } from './native-token-store'
 import { registerNativeNotifications } from './notification-ipc'
+import { registerTerminalChime } from './terminal-chime'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { mintGatewayWsTicket as mintOauthGatewayWsTicket, requestWithOauthFallback } from './oauth-rest-request'
@@ -17396,6 +17397,7 @@ const ownsAmbientCue = createAmbientClaimArbiter()
 ipcMain.handle('hermes:ambient:claim', (_event, key) => ownsAmbientCue(String(key ?? '')))
 
 const nativeNotifications = registerNativeNotifications({ getMainWindow: () => mainWindow, focusWindow })
+registerTerminalChime()
 
 // Data-URL file load cap (composer attach + local previews). Main owns the
 // persisted MB value so every IPC read honours Settings → Chat without the

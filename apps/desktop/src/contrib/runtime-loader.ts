@@ -64,6 +64,10 @@ const loaded = new Map<string, (() => void)[]>()
  *  and, through the disk scan's sequential loop, every plugin listed after it. */
 const IMPORT_TIMEOUT_MS = 10_000
 
+/** Last source that registered without throwing. A bad hot-edit restores this
+ *  instead of leaving the slot empty. */
+const lastGoodSource = new Map<string, string>()
+
 // Matches the specifier of a static `from '…'`, a side-effect `import '…'`, or
 // a dynamic `import('…')`. Deliberately loose — a sentence ending in `from`, a
 // quoted example, a commented-out import all match it — so a match is honoured
@@ -355,6 +359,8 @@ export async function loadRuntimePlugin(
 
     const activate = () => {
       // Reload = dispose the previous incarnation, then register fresh.
+      // If register throws, restore the last source that succeeded so a
+      // hot-edit cannot empty the slot.
       unloadRuntimePlugin(plugin.id)
       const disposers: (() => void)[] = []
       // Registered BEFORE register() runs so a throw mid-way is disposable.
@@ -368,11 +374,24 @@ export async function loadRuntimePlugin(
           () => plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose)))
         )
       } catch (error) {
+        // A bad hot-edit restores the last source that registered without
+        // throwing, instead of leaving the plugin's slot empty.
+        const fallback = lastGoodSource.get(plugin.id)
+
+        if (fallback && fallback !== source) {
+          failRegistration(disposers, error)
+          notifyError(error, `Plugin "${origin}" failed; restored last-known-good`)
+          void loadRuntimePlugin(fallback, origin, options)
+
+          return
+        }
+
         failRegistration(disposers, error)
 
         return
       }
 
+      lastGoodSource.set(plugin.id, source)
       publishPlugin({ ...record, status: 'loaded' })
 
       // An `async register()` that rejects would otherwise be an unhandled
