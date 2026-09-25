@@ -629,6 +629,17 @@ def fetch_openrouter_models(
             desc = "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""
         curated.append((preferred_id, desc))
 
+    # Hermes used to cap this picker at 50, then set the cap to None. None is
+    # unlimited on the slice path, but this function still returned only the
+    # curated handful — or a single injected current model when that handful
+    # missed the live catalog. Append the rest of the live tool-capable list.
+    seen = {mid for mid, _ in curated}
+    for mid, live_item in live_by_id.items():
+        if mid in seen or not _openrouter_model_supports_tools(live_item):
+            continue
+        desc = "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""
+        curated.append((mid, desc))
+
     if not curated:
         return list(cached or fallback)
     if not curated[0][1]:

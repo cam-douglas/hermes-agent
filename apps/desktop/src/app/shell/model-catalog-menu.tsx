@@ -26,7 +26,8 @@ import { useI18n } from '@/i18n'
 import { isSubmitEnter } from '@/lib/ime'
 import { catalogProviderMatches, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
-import { reasoningEffortLabel } from '@/lib/reasoning-effort'
+import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
+import { usePickerFilterCapture } from '@/lib/picker-typeahead'
 import { foldIncludes, normalize } from '@/lib/text'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -145,6 +146,7 @@ export function ModelCatalogMenu({
   // type. Typing a slug without this works too; the row just makes it findable.
   const [slugEntry, setSlugEntry] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
+  usePickerFilterCapture(true, searchRef, setSearch)
   const collapsedProviders = useStoreCollapsed()
   const defaultEffort = useDefaultEffort()
   // Which models the user curated in Edit Models. Read HERE rather than taken
@@ -479,6 +481,7 @@ export function ModelCatalogMenu({
     <>
       <DropdownMenuSearch
         aria-label={copy.search}
+        ref={searchRef}
         onKeyDown={event => {
           // Claim arrows and Enter from Radix so DOM focus stays in the input
           // and Enter commits the highlighted row without a DownArrow first.

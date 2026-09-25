@@ -23,6 +23,7 @@ import type { ChatMessage } from '@/lib/chat-messages'
 import { NEW_SESSION_TITLE, quickModelOptions, sessionTitle } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { currentModelCapabilities, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
+import { currentPickerSelection } from '@/lib/model-status-label'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { migrateSessionDraft } from '@/store/composer'
@@ -707,9 +708,14 @@ const ChatViewContent = memo(function ChatViewContent({
     enabled: gatewayOpen
   })
 
+  const pickerSelection = currentPickerSelection(
+    { model: currentModel, provider: currentProvider },
+    modelOptionsQuery.data
+  )
+
   const quickModels = useMemo(
-    () => quickModelOptions(modelOptionsQuery.data, currentProvider, currentModel),
-    [currentModel, currentProvider, modelOptionsQuery.data]
+    () => quickModelOptions(modelOptionsQuery.data, pickerSelection.provider, pickerSelection.model),
+    [modelOptionsQuery.data, pickerSelection.model, pickerSelection.provider]
   )
 
   const supportsReasoning = currentModelCapabilities(modelOptionsQuery.data, currentProvider, currentModel)?.reasoning
@@ -717,10 +723,12 @@ const ChatViewContent = memo(function ChatViewContent({
   const chatBarState = useMemo<ChatBarState>(
     () => ({
       model: {
-        model: currentModel,
-        provider: currentProvider,
+        model: pickerSelection.model,
+        provider: pickerSelection.provider,
         canSwitch: gatewayOpen,
-        loading: !gatewayOpen || (!currentModel && !currentProvider),
+        loading:
+          !gatewayOpen ||
+          (!pickerSelection.model && !pickerSelection.provider && modelOptionsQuery.isPending),
         modelMenuContent,
         quickModels,
         reasoningMenuContent,
@@ -742,6 +750,9 @@ const ChatViewContent = memo(function ChatViewContent({
       currentProvider,
       gatewayOpen,
       modelMenuContent,
+      modelOptionsQuery.isPending,
+      pickerSelection.model,
+      pickerSelection.provider,
       quickModels,
       reasoningMenuContent,
       supportsReasoning
