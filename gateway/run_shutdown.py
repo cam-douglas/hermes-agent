@@ -876,6 +876,15 @@ class GatewayShutdownMixin:
         platform_cfg = self.config.platforms.get(platform)
         return platform_cfg is None or bool(platform_cfg.gateway_restart_notification)
 
+    def _notice_allowed(self, platform: Platform, what: str) -> bool:
+        """``_restart_notification_allowed`` with the INFO suppression line for shutdown notices."""
+        if self._restart_notification_allowed(platform):
+            return True
+        logger.info(
+            "Shutdown notification suppressed for %s: %s has gateway_restart_notification=false", what, platform.value,
+        )
+        return False
+
     async def _notify_interrupted_cron_jobs(self, job_ids) -> int:
         """Tell the owner of each just-interrupted cron job that its run died; returns notices sent.
 
@@ -962,16 +971,43 @@ class GatewayShutdownMixin:
             return False
         return True
 
+    async def _shutdown_notification_target(self, session_key: str):
+        """``(source, platform_str, chat_id, thread_id, profile)``: persisted origin > cached source >
+        parsed key. ``profile`` is the owning profile from the source or the ``agent:<profile>:`` key
+        namespace (``None`` = default) so the notice leaves through that profile's bot."""
+        from gateway.run import _parse_session_key
+        source = None
+        try:
+            if getattr(self, "session_store", None) is not None:
+                await self.async_session_store._ensure_loaded()
+                entry = self.session_store._entries.get(session_key)
+                source = getattr(entry, "origin", None) if entry else None
+        except Exception as e:
+            logger.debug("Failed to load session origin for shutdown notification %s: %s", session_key, e)
+        if source is None:
+            source = self._get_cached_session_source(session_key)
+        if source is not None:
+            return source, source.platform.value, str(source.chat_id), source.thread_id, getattr(source, "profile", None)
+        _parsed = _parse_session_key(session_key)
+        if not _parsed:
+            return None
+        return None, _parsed["platform"], _parsed["chat_id"], _parsed.get("thread_id"), _parsed.get("profile")
+
+    async def _send_shutdown_notice(
+        self, adapter, chat_id: str, msg: str, kind: str, platform_str: str, **send_kwargs
+    ) -> bool:
+        """Send one shutdown notice; True when delivered. Failures are debug-logged, never raised."""
+        where = "home channel " if kind == "home channel" else ""
+        fail_fmt = f"Failed to send shutdown notification to {where}%s:%s: %s"
+        if not await self._send_notice_logged(adapter, chat_id, msg, platform_str, fail_fmt, **send_kwargs):
+            return False
+        logger.info("Sent shutdown notification to %s %s:%s", kind, platform_str, chat_id)
+        return True
+
     async def _notify_active_sessions_of_shutdown(self) -> None:
         """Send shutdown/restart notifications to active chats and home channels.
 
         Called at the start of stop() while adapters are connected; send failures never block shutdown.
-
-        Disabled by explicit user preference: the only gateway-lifecycle messages that should reach
-        end users are the "back online" notice (gated by ``gateway_restart_notification``, see
-        ``_send_home_channel_startup_notifications``/``_send_restart_notification``) and the
-        Photon-only unhealthy alert (``_notify_gateway_unhealthy``). A routine restart/shutdown is
-        not, by itself, something the user wants to hear about.
         """
         restart_source = self._restart_command_source if self._restart_requested else None
         msg = (
