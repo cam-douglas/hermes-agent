@@ -456,6 +456,11 @@ def get_preferred_silent_default_model(provider: str = "openrouter") -> str:
             return labeled
     except Exception:
         pass
+    # An explicitly configured model is authoritative. Catalog defaults are
+    # only for an empty/unconfigured selection and must never replace it.
+    configured = _get_model_config_dict().get("default")
+    if configured and str(configured).strip():
+        return str(configured).strip()
     return PREFERRED_SILENT_DEFAULT_MODEL
 
 

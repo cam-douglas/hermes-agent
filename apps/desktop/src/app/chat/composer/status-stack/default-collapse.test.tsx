@@ -42,7 +42,7 @@ afterEach(() => {
   $todosBySession.set({})
 })
 
-it('auto-expands only todos and keeps other groups closed as activity arrives', () => {
+it('keeps unfinished todos open and other groups closed as activity arrives', () => {
   $todosBySession.set({ owner: [{ id: 'todo', content: 'Visible todo', status: 'in_progress' }] })
   $goalsBySession.set({ owner: { status: 'active', title: 'Hidden legacy goal', updatedAt: 1 } })
   $backgroundStatusBySession.set({
@@ -68,6 +68,18 @@ it('auto-expands only todos and keeps other groups closed as activity arrives', 
   expect(screen.getByText('Progress arrived')).toBeTruthy()
   view.rerender(stack(false))
   expect(screen.getByText('Worker task')).toBeTruthy()
+})
+
+it('keeps the task list open until every task is complete', () => {
+  $todosBySession.set({ owner: [{ id: 'todo', content: 'Finished todo', status: 'completed' }] })
+  const view = render(stack())
+
+  const header = screen.getByRole('button', { name: /1 task/i })
+  expect(header.getAttribute('aria-expanded')).toBe('false')
+  expect(screen.queryByText('Finished todo')).toBeNull()
+
+  view.rerender(stack(true))
+  expect(screen.queryByText('Finished todo')).toBeNull()
 })
 
 it('starts structured goals collapsed and preserves manual queue expansion when parked', () => {

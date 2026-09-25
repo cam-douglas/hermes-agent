@@ -517,6 +517,9 @@ def _run_after_agent_ready(
                 if session.get("_turn_cancel_requested")
                 else "Session no longer running before the agent was ready")})
             return
+    apply_confirm = globals().get("_apply_user_todo_confirmation")
+    if callable(apply_confirm):
+        apply_confirm(sid, session, text)
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
         terminal_callback=hosted_terminal_callback, turn_author=turn_author)

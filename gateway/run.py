@@ -5778,6 +5778,7 @@ async def _start_gateway_shutdown_tail(
 
     _best_effort(_stop_keepalive)
 
+
     # Never join(): an in-flight cron delivery is a coroutine on THIS loop; a sync join would drop it.
     # Stop cron scheduler + housekeeping cleanly. These MUST be awaited cooperatively, not join()ed. A cron
     # delivery in flight when the gateway restarts is a coroutine scheduled onto THIS event loop
@@ -5937,6 +5938,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         _shutdown_gateway_health_export(runner)
         raise
     if not success:
+        if runner.should_exit_with_failure:
+            with suppress(Exception):
+                await runner._send_gateway_unhealthy_notification(runner.exit_reason)
         _shutdown_gateway_health_export(runner)
         return False
 
