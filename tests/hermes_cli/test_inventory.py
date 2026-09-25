@@ -748,7 +748,7 @@ def test_openrouter_capabilities_skip_non_featured_lookups():
     class _Meta:
         supports_reasoning = True
 
-    def _fake_caps(slug, model):
+    def _fake_caps(slug, model, **_kwargs):
         calls.append((slug, model))
         return _Meta()
 
