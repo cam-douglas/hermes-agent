@@ -26,10 +26,12 @@ class TestWriteAndRead:
             {"id": "2", "content": "Other task", "status": "pending"},
             {"id": "1", "content": "Latest version", "status": "in_progress"},
         ])
-        assert result == [
-            {"id": "1", "content": "Latest version", "status": "in_progress"},
-            {"id": "2", "content": "Other task", "status": "pending"},
-        ]
+        assert [item["id"] for item in result] == ["1", "2"]
+        assert result[0]["content"] == "Latest version"
+        assert result[0]["status"] == "in_progress"
+        assert result[0]["code"] == "A1"
+        assert result[0]["work_status"] == "planned"
+        assert result[1]["content"] == "Other task"
 
     def test_write_moves_active_item_before_earlier_pending_step(self):
         store = TodoStore()
@@ -38,11 +40,10 @@ class TestWriteAndRead:
             {"id": "2", "content": "Verify freed space", "status": "pending"},
             {"id": "3", "content": "Move archives to Trash", "status": "in_progress"},
         ])
-        assert result == [
-            {"id": "1", "content": "Already done", "status": "completed"},
-            {"id": "3", "content": "Move archives to Trash", "status": "in_progress"},
-            {"id": "2", "content": "Verify freed space", "status": "pending"},
-        ]
+        assert [item["id"] for item in result] == ["1", "3", "2"]
+        assert result[0]["work_status"] == "pending_review"
+        assert result[1]["status"] == "in_progress"
+        assert result[1]["code"] == "A3"
 
 
 class TestHasItems:
@@ -69,14 +70,11 @@ class TestFormatForInjection:
             {"id": "3", "content": "Working", "status": "in_progress"},
         ])
         text = store.format_for_injection()
-        # Completed items are filtered out of injection
-        assert "[x]" not in text
-        assert "Do thing" not in text
-        # Active items are included
-        assert "[ ]" in text
-        assert "[>]" in text
-        assert "Next" in text
-        assert "Working" in text
+        # Unconfirmed completed work stays as PENDING_REVIEW
+        assert "A1_PENDING_REVIEW: Do thing" in text
+        assert "A2_PLANNED: Next" in text
+        assert "A3_PLANNED: Working" in text
+        assert "context compression" in text.lower()
 
 
 class TestMergeMode:
@@ -115,11 +113,9 @@ class TestMergeMode:
             [{"id": "3", "status": "in_progress"}],
             merge=True,
         )
-        assert result == [
-            {"id": "1", "content": "Completed", "status": "completed"},
-            {"id": "3", "content": "Move archives to Trash", "status": "in_progress"},
-            {"id": "2", "content": "Verify freed space", "status": "pending"},
-        ]
+        assert [item["id"] for item in result] == ["1", "3", "2"]
+        assert result[1]["status"] == "in_progress"
+        assert result[2]["status"] == "pending"
 
 
 class TestTodoToolFunction:
@@ -211,52 +207,52 @@ class TestTodoStoreBounds:
         assert "[truncated]" not in items[0]["content"]
 
 
-class TestUserGatedCompletion:
-    def test_agent_cannot_mark_complete_until_user_confirms(self):
+class TestUserOwnedTodos:
+    def test_add_confirm_delete(self):
         store = TodoStore()
-        store.write([{"id": "1", "content": "Ship A14", "status": "in_progress"}])
-        result = json.loads(todo_tool(
-            todos=[{"id": "1", "content": "Ship A14", "status": "completed"}],
-            merge=True,
-            store=store,
-        ))
-        assert result["todos"][0]["status"] == "in_progress"
+        first = store.add_item("Plus button")
+        assert first["id"] == "A1"
+        assert first["code"] == "A1"
+        assert first["work_status"] == "planned"
+        assert first["status"] == "pending"
         assert store.keep_open() is True
-
-    def test_user_done_confirms_in_progress_item(self):
-        from tools.todo_tool import confirm_from_user_text
-        store = TodoStore()
-        store.write([
-            {"id": "1", "content": "Ship A14", "status": "in_progress"},
-            {"id": "2", "content": "Ship A15", "status": "pending"},
-        ])
-        assert confirm_from_user_text(store, "done") == ["1"]
+        store.confirm_ids(["A1"])
         assert store.read()[0]["status"] == "completed"
-        assert store.read()[1]["status"] == "pending"
+        assert store.keep_open() is False
+        assert store.format_outstanding() == []
+        store.add_item("Remove me")
+        store.delete_ids(["A2"])
+        assert [item["id"] for item in store.read()] == ["A1"]
+        extra = store.add_item("Cancel me")
+        cancelled = store.cancel_ids([extra["id"]])
+        assert cancelled[0]["content"] == "Cancel me"
+        assert all(item["id"] != extra["id"] for item in store.read())
+
+    def test_batch_uses_next_letter_and_pending_review_stays_open(self):
+        store = TodoStore()
+        store.add_items(["Task menu", "Queue with Cmd+Enter"], new_group=True)
+        store.add_items(["Status codes"], new_group=True)
+        labels = store.format_outstanding()
+        assert labels == [
+            "A1_PLANNED: Task menu",
+            "A2_PLANNED: Queue with Cmd+Enter",
+            "B3_PLANNED: Status codes",
+        ]
+        store.write([{"id": "A1", "status": "completed"}], merge=True)
+        assert store.read()[0]["work_status"] == "pending_review"
+        assert store.keep_open() is True
+        assert "A1_PENDING_REVIEW: Task menu" in store.format_outstanding()
+        store.confirm_ids(["A1"])
+        assert "A1_PENDING_REVIEW: Task menu" not in store.format_outstanding()
         assert store.keep_open() is True
 
-    def test_all_done_confirms_every_open_item(self):
-        from tools.todo_tool import confirm_from_user_text
+    def test_blocked_reason_label(self):
         store = TodoStore()
-        store.write([
-            {"id": "1", "content": "One", "status": "in_progress"},
-            {"id": "2", "content": "Two", "status": "pending"},
-        ])
-        assert set(confirm_from_user_text(store, "all done")) == {"1", "2"}
-        assert all(item["status"] == "completed" for item in store.read())
-        assert store.keep_open() is False
-
-    def test_new_task_wording_does_not_confirm(self):
-        from tools.todo_tool import confirm_from_user_text
-        store = TodoStore()
-        store.write([{"id": "1", "content": "Login page", "status": "in_progress"}])
-        assert confirm_from_user_text(store, "please complete the login page") == []
-        assert store.read()[0]["status"] == "in_progress"
-
-    def test_user_add_edit_delete(self):
-        store = TodoStore()
-        store.add_item("Write the plus button")
-        assert store.read()[0]["content"] == "Write the plus button"
-        store.write([{"id": "1", "content": "Write the plus and edit"}], merge=True)
-        store.delete_ids(["1"])
-        assert store.read() == []
+        store.add_item(
+            "Use occasional emojis",
+            work_status="blocked",
+            blocked_reason="User changed their mind",
+        )
+        assert store.format_outstanding() == [
+            "A1_BLOCKED: Use occasional emojis_BLOCKED_REASON: User changed their mind"
+        ]

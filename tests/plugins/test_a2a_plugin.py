@@ -539,6 +539,31 @@ class TestRegistryDispatchConvention:
         assert captured.get("sent") is True
         assert "PONG" in out
 
+    def test_a2a_call_uses_scoped_session_when_runtime_session_is_absent(self, monkeypatch):
+        """Desktop deferred-tool calls preserve the turn ContextVar even when the
+        bridge does not forward a ``session_id`` keyword to the handler."""
+        monkeypatch.setattr(tools, "_load_config",
+                            lambda: {"a2a_agents": {"peer": {"url": "http://localhost:9999"}}})
+        monkeypatch.setattr(tools, "_http_get_json", lambda url, h, t: None)
+        import gateway.session_context as session_context
+        monkeypatch.setattr(session_context, "session_context_engaged", lambda: True)
+        monkeypatch.setattr(session_context, "get_session_env",
+                            lambda name, default="": "desktop-origin-session"
+                            if name == "HERMES_SESSION_ID" else default)
+        captured = {}
+
+        def fake_post(url, body, headers, timeout):
+            captured["metadata"] = body["params"]["message"].get("metadata")
+            return protocol.jsonrpc_result(
+                body["id"],
+                protocol.build_task("t", "c1", protocol.STATE_COMPLETED, "PONG"),
+            )
+
+        monkeypatch.setattr(tools, "_http_post_json", fake_post)
+        out = tools.a2a_call({"agent": "peer", "message": "ping"})
+        assert "PONG" in out
+        assert captured["metadata"] == {"hermesReplySessionId": "desktop-origin-session"}
+
 
 # --------------------------------------------------------------------------
 # A2A reply capture (send() + on_processing_complete)

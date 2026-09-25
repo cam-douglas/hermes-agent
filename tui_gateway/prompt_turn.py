@@ -87,9 +87,9 @@ def _archive_notice_prepend(session: dict) -> str | None:
             lines.append(f"`{e['code']}` — [{e['source']}] {e['title']}")
         lines += [
             "",
-            "Reply with a code (e.g. `3C`) to restore that one, 'approve' to keep them all "
-            "archived, 'deny' to restore all of the above, or just ignore this — doing nothing "
-            "also keeps them archived.",
+            "To restore one session, reply with its code (e.g. `3C`). Reply 'deny' to restore "
+            "all sessions listed above. No reply is required; simply ignoring this notice keeps "
+            "them archived.",
         ]
         return "\n".join(lines)
     except Exception:

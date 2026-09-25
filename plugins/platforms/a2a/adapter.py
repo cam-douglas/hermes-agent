@@ -490,8 +490,13 @@ class A2AAdapter(BasePlatformAdapter):
         try:
             from tools.registry import registry as tool_registry
             allowed = set(configured or []) or None
-            mapping = {n: tool_registry.get_tool_names_for_toolset(n)
-                       for n in tool_registry.get_registered_toolset_names() if allowed is None or n in allowed}
+            registered = set(tool_registry.get_registered_toolset_names())
+            # An explicitly allowed name that isn't a live registered toolset (a descriptive
+            # capability label rather than an actual toolset) still advertises, with no
+            # tool-name tags, instead of silently vanishing whenever another allowed name
+            # DOES match the registry (partial-match masking).
+            mapping = {n: (tool_registry.get_tool_names_for_toolset(n) if n in registered else [])
+                       for n in (allowed if allowed is not None else registered)}
             if mapping:
                 return protocol.skills_from_toolsets(mapping)
         except Exception:

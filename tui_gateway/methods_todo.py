@@ -33,15 +33,20 @@ def _ensure_todo_store(session):
 
 def _todo_payload(store):
     snap = store.snapshot()
-    state = _normalize_todo_state(snap)
-    if state is None:
-        return {
-            "todos": snap.get("todos") or [],
-            "revision": int(snap.get("revision") or 0),
-            "user_confirmed": list(snap.get("user_confirmed") or []),
-            "keep_open": bool(snap.get("keep_open")),
-        }
-    return state
+    todos = snap.get("todos") or []
+    outstanding = list(snap.get("outstanding_labels") or [])
+    keep_open = bool(
+        snap.get("keep_open")
+        or any(item.get("outstanding") for item in todos)
+        or bool(outstanding)
+    )
+    return {
+        "todos": todos,
+        "revision": int(snap.get("revision") or 0),
+        "user_confirmed": list(snap.get("user_confirmed") or []),
+        "keep_open": keep_open,
+        "outstanding_labels": outstanding,
+    }
 
 
 def _publish_todo_state(sid, session, store):
@@ -87,7 +92,24 @@ def _(rid, params: dict) -> dict:
     cached = _session_todo_state(session)
     return _ok(rid, cached or {
         "todos": [], "revision": 0, "user_confirmed": [], "keep_open": False,
+        "outstanding_labels": [],
     })
+
+
+def _add_contents(store, params):
+    raw = (params or {}).get("contents")
+    if isinstance(raw, list) and raw:
+        contents = [str(item).strip() for item in raw if str(item).strip()]
+    else:
+        contents = [str((params or {}).get("content") or "").strip()]
+    contents = [item for item in contents if item]
+    if not contents:
+        return None
+    parent = str((params or {}).get("parent") or "").strip() or None
+    group = str((params or {}).get("group") or "").strip() or None
+    new_group = bool((params or {}).get("new_group", len(contents) > 1))
+    store.add_items(contents, parent, group=group, new_group=new_group)
+    return contents
 
 
 @method("todo.add")
@@ -96,12 +118,23 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    content = str((params or {}).get("content") or "").strip()
-    if not content:
-        return _err(rid, 4004, "content is required")
     store = _ensure_todo_store(session)
-    parent = str((params or {}).get("parent") or "").strip() or None
-    store.add_item(content, parent)
+    if _add_contents(store, params) is None:
+        return _err(rid, 4004, "content is required")
+    return _ok(rid, _publish_todo_state(_session_id(params), session, store))
+
+
+@method("todo.add_batch")
+def _(rid, params: dict) -> dict:
+    """Add one submit-batch (same letter group) and keep the list open."""
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    store = _ensure_todo_store(session)
+    params = dict(params or {})
+    params["new_group"] = True
+    if _add_contents(store, params) is None:
+        return _err(rid, 4004, "contents is required")
     return _ok(rid, _publish_todo_state(_session_id(params), session, store))
 
 
@@ -111,7 +144,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    item_id = str((params or {}).get("id") or "").strip()
+    item_id = str((params or {}).get("id") or "").strip().replace("todo:", "")
     if not item_id:
         return _err(rid, 4004, "id is required")
     store = _ensure_todo_store(session)
@@ -123,14 +156,33 @@ def _(rid, params: dict) -> dict:
         patch["content"] = content
     if "status" in (params or {}) and params.get("status") is not None:
         status = str(params.get("status") or "").strip().lower()
-        if status == "completed":
-            store.confirm_ids([item_id])
-            return _ok(rid, _publish_todo_state(_session_id(params), session, store))
-        if status in {"pending", "in_progress", "cancelled"}:
+        if status in {"pending", "in_progress", "cancelled", "completed",
+                      "planned", "pending_review", "blocked"}:
             patch["status"] = status
+    if "work_status" in (params or {}) and params.get("work_status") is not None:
+        patch["work_status"] = str(params.get("work_status") or "").strip().lower()
+    if params.get("blocked_reason"):
+        patch["blocked_reason"] = str(params.get("blocked_reason") or "").strip()
     if set(patch) == {"id"}:
         return _err(rid, 4004, "content or status is required")
     store.write([patch], merge=True)
+    return _ok(rid, _publish_todo_state(_session_id(params), session, store))
+
+
+@method("todo.cancel")
+def _(rid, params: dict) -> dict:
+    """User dismissed a task with x. Remove it and keep the list consistent."""
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    item_id = str((params or {}).get("id") or "").strip().replace("todo:", "")
+    if not item_id:
+        return _err(rid, 4004, "id is required")
+    store = _ensure_todo_store(session)
+    if hasattr(store, "cancel_ids"):
+        store.cancel_ids([item_id])
+    else:
+        store.delete_ids([item_id])
     return _ok(rid, _publish_todo_state(_session_id(params), session, store))
 
 
@@ -140,7 +192,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    item_id = str((params or {}).get("id") or "").strip()
+    item_id = str((params or {}).get("id") or "").strip().replace("todo:", "")
     if not item_id:
         return _err(rid, 4004, "id is required")
     store = _ensure_todo_store(session)

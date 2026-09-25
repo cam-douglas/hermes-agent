@@ -1,61 +1,185 @@
 /**
- * Editable session task list for the live Desktop window.
- * Pulled onto the Mac at ~/.hermes/desktop-plugins/task-list/plugin.js
+ * Tasks entry in the composer + menu. Pulled onto the Mac at
+ * ~/.hermes/desktop-plugins/task-list/plugin.js
  */
 import { host } from '@hermes/plugin-sdk'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'task-list'
 const POLL_MS = 2000
-const FLAG = '__hermesTaskListUi'
-const ADD_EVENT = 'hermes-task-list-add'
+const FLAG = '__hermesTaskListBar'
+const OPEN_EVENT = 'hermes-task-list-open'
 
 const CSS = `
-.hermes-tasks{display:flex;flex-direction:column;gap:4px;padding:6px 8px 8px;max-height:min(28vh,16rem);overflow-y:auto}
-.hermes-tasks-head{display:flex;align-items:center;gap:6px;min-width:0}
-.hermes-tasks-title{margin:0;flex:1 1 auto;min-width:0;font-size:11px;font-weight:600;color:var(--ui-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hermes-tasks{display:flex;flex-direction:column;gap:2px;padding:2px 0 4px;max-height:min(36vh,18rem);overflow-y:auto;width:100%;box-sizing:border-box;border-bottom:1px solid color-mix(in srgb,var(--ui-stroke-secondary, rgba(127,127,127,.25)) 80%,transparent)}
+.hermes-tasks[data-min="1"]{flex-direction:row;align-items:center;max-height:none;overflow:hidden;padding:1px 0 2px;gap:4px;border-bottom:1px solid color-mix(in srgb,var(--ui-stroke-secondary, rgba(127,127,127,.25)) 55%,transparent)}
+.hermes-tasks-head{display:flex;align-items:center;gap:4px;min-width:0;width:100%}
+.hermes-tasks-toggle{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:1.35rem;height:1.35rem;padding:0;border:0;border-radius:6px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer;font-size:12px;line-height:1}
+.hermes-tasks-toggle:hover{background:var(--chrome-action-hover);color:var(--ui-text-primary)}
+.hermes-tasks-title{margin:0;flex:1 1 auto;min-width:0;padding:0;border:0;background:transparent;color:var(--ui-text-secondary);font-size:11px;font-weight:500;text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hermes-tasks-title:hover{color:var(--ui-text-primary)}
 .hermes-tasks-btn{display:inline-flex;align-items:center;justify-content:center;width:1.35rem;height:1.35rem;padding:0;border:0;border-radius:6px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer;font-size:14px;line-height:1}
 .hermes-tasks-btn:hover{background:var(--chrome-action-hover);color:var(--ui-text-primary)}
 .hermes-tasks-btn[data-kind=danger]:hover{color:var(--ui-danger, var(--destructive))}
+.hermes-tasks-body{display:flex;flex-direction:column;gap:2px;padding:0 0 0 1.35rem}
 .hermes-tasks-row{display:flex;align-items:center;gap:4px;min-width:0}
-.hermes-tasks-text{flex:1 1 auto;min-width:0;border:0;background:transparent;color:var(--ui-text-primary);font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.hermes-tasks-text[data-status=completed]{color:var(--ui-text-tertiary);text-decoration:line-through}
-.hermes-tasks-text[data-status=in_progress]{color:var(--ui-accent)}
-.hermes-tasks-input{flex:1 1 auto;min-width:0;height:1.5rem;padding:0 6px;border:1px solid color-mix(in srgb,var(--ui-accent) 35%,transparent);border-radius:6px;background:transparent;color:var(--ui-text-primary);font-size:12px}
-.hermes-tasks-empty{margin:0;font-size:11px;color:var(--ui-text-tertiary)}
-.hermes-tasks-hint{margin:0;font-size:10px;color:var(--ui-text-tertiary)}
-[data-hermes-native-todos=hidden]{display:none!important}
+.hermes-tasks-text{flex:1 1 auto;min-width:0;border:0;background:transparent;color:var(--ui-text-primary);font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;cursor:text}
+.hermes-tasks-text[data-status=pending_review]{color:var(--ui-accent)}
+.hermes-tasks-text[data-status=blocked]{color:var(--ui-danger, var(--destructive))}
+.hermes-tasks-text[data-status=queued]{color:var(--ui-text-secondary);font-style:italic}
+.hermes-tasks-input{flex:1 1 auto;min-width:0;height:1.5rem;padding:2px 6px;border:1px solid color-mix(in srgb,var(--ui-accent) 35%,transparent);border-radius:6px;background:transparent;color:var(--ui-text-primary);font-size:12px;resize:none;line-height:1.25}
+.hermes-tasks-hint{margin:0;padding:0 2px;font-size:10px;color:var(--ui-text-tertiary)}
 `
 
-function currentSessionId() {
-  const state = host.state || {}
+function isTaskListKeyEvent(event) {
+  const nodes = [event?.target, typeof document !== 'undefined' ? document.activeElement : null]
+  for (const el of nodes) {
+    if (!el || typeof el.closest !== 'function') continue
+    if (
+      el.closest('[data-slot="hermes-task-list"]') ||
+      el.closest('[data-hermes-task-input]') ||
+      el.classList?.contains('hermes-tasks-input')
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function readAtom(atom) {
   try {
-    const focused = state.focusedSessionId?.get?.()
-    if (focused) return String(focused)
-    const active = state.activeSessionId?.get?.()
-    if (active) return String(active)
+    if (!atom) return ''
+    if (typeof atom.get === 'function') {
+      const value = atom.get()
+      return value == null ? '' : String(value).trim()
+    }
+    if (typeof atom === 'string') return atom.trim()
   } catch {
-    // older SDK
+    // ignore
   }
   return ''
 }
 
-async function rpc(method, params) {
-  return host.request(method, params)
+const TASK_SYSTEM_PROMPT = [
+  '[TASK_BOARD]',
+  'Use the existing todo_list tool for this session. Cam submitted these tasks from the Desktop task list.',
+  'They are already on the session todo list when add succeeded. Call todo_list with merge=true to record any that are missing, then execute them. Do not invent a second task system.',
+  'Permitted statuses are only PLANNED, PENDING_REVIEW, and BLOCKED.',
+  'Write unfinished work as A1_PLANNED: paraphrase. Related work shares a letter. A new theme takes the next letter and keeps the global number. Integrations use combined letters (AB7).',
+  'When a task is verified and working, set that item to PENDING_REVIEW (status completed or work_status pending_review). Do not leave it PLANNED after you finish.',
+  'NEVER delete, cancel, or omit tasks from todo_list. Removals are Cam-only: the x button or Cam explicitly confirming in chat.',
+  'BLOCKED must include _BLOCKED_REASON: why.',
+  'End every visible reply with the outstanding unfinished list. Outstanding means unfinished, never finished.',
+  'Keep working each task until Cam says stop or ignore. Coding and docs go to Cursor. Cursor returns finished results. Use subagents in parallel when that is faster.'
+].join('\n')
+
+function visibleComposerSurface() {
+  const nodes = [...document.querySelectorAll('[data-composer-target]')]
+  return nodes.find(el => !el.closest('[data-pane-hidden]')) || nodes[0] || null
+}
+
+function submitViaComposerEvent(text) {
+  const trimmed = String(text || '').trim()
+  const surface = visibleComposerSurface()
+  const surfaceId = surface?.dataset?.composerSurfaceId
+  const target = surface?.dataset?.composerTarget || 'main'
+  if (!trimmed || !surfaceId) return false
+  window.dispatchEvent(
+    new CustomEvent('hermes:composer-submit', {
+      detail: { surfaceId, target, text: trimmed }
+    })
+  )
+  return true
+}
+
+async function startHermesOnTasks(sessionId, contents) {
+  const prompt = `${TASK_SYSTEM_PROMPT}\n\nTasks:\n${contents.map((text, index) => `${index + 1}. ${text}`).join('\n')}`
+  if (sessionId) {
+    try {
+      const result = await host.request('prompt.submit', { session_id: sessionId, text: prompt, source: 'desktop' })
+      const status = String(result?.status || '').toLowerCase()
+      if (status === 'streaming' || status === 'queued' || status === 'steered' || status === 'redirected') {
+        return true
+      }
+    } catch {
+      // composer fallback
+    }
+  }
+  return submitViaComposerEvent(prompt)
+}
+
+async function hiddenTaskTurn(sessionId, body) {
+  if (!body) return
+  const prompt = `${TASK_SYSTEM_PROMPT}\n\n${body}`
+  if (sessionId) {
+    try {
+      await host.request('prompt.submit', { session_id: sessionId, text: prompt, source: 'desktop' })
+      return
+    } catch {
+      // composer fallback
+    }
+  }
+  submitViaComposerEvent(prompt)
+}
+
+function currentSessionId() {
+  const state = host.state || {}
+  return (
+    readAtom(state.focusedSessionId) ||
+    readAtom(state.activeSessionId) ||
+    readAtom(state.focusedStoredSessionId) ||
+    ''
+  )
 }
 
 function todoId(item) {
-  return String(item?.id || '').replace(/^todo:/, '')
+  return String(item?.id || item?.code || '').replace(/^todo:/, '')
+}
+
+function workStatus(item) {
+  const raw = String(item?.work_status || '').trim().toLowerCase()
+  if (raw === 'planned' || raw === 'pending_review' || raw === 'blocked') return raw
+  const status = String(item?.status || '').trim().toLowerCase()
+  if (status === 'cancelled') return 'blocked'
+  if (status === 'completed') return item?.user_confirmed ? 'finished' : 'pending_review'
+  return 'planned'
+}
+
+function isOutstanding(item) {
+  if (!item) return false
+  if (item.outstanding === true) return true
+  if (item.outstanding === false || item.user_confirmed === true) return false
+  const ws = workStatus(item)
+  return ws === 'planned' || ws === 'pending_review' || ws === 'blocked'
+}
+
+function taskLabel(item) {
+  if (item?.label) return String(item.label)
+  const code = String(item?.code || item?.id || '').replace(/^todo:/, '') || '?'
+  const ws = workStatus(item).toUpperCase()
+  let line = `${code}_${ws}: ${item?.content || ''}`
+  if (ws === 'BLOCKED' && item?.blocked_reason) {
+    line += `_BLOCKED_REASON: ${item.blocked_reason}`
+  }
+  return line
 }
 
 function TaskPanel() {
+  const [expanded, setExpanded] = useState(false)
   const [sid, setSid] = useState(() => currentSessionId())
   const [state, setState] = useState({ todos: [], keep_open: false, revision: 0 })
-  const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState('')
+  const [queue, setQueue] = useState([])
   const [editing, setEditing] = useState('')
   const [editText, setEditText] = useState('')
+  const inputRef = useRef(null)
+  const queueRef = useRef([])
+  const draftRef = useRef('')
+  const submitRef = useRef(() => {})
+  const queueDraftRef = useRef(() => {})
+  queueRef.current = queue
+  draftRef.current = draft
 
   useEffect(() => {
     let cancelled = false
@@ -64,22 +188,17 @@ function TaskPanel() {
       if (!cancelled) setSid(currentSessionId())
     }
     for (const atom of [host.state?.focusedSessionId, host.state?.activeSessionId]) {
-      if (atom && typeof atom.listen === 'function') {
-        unsubs.push(atom.listen(applySid))
-      }
+      if (atom && typeof atom.listen === 'function') unsubs.push(atom.listen(applySid))
     }
     const refresh = async () => {
       applySid()
       const sessionId = currentSessionId()
-      if (!sessionId) {
-        if (!cancelled) setState({ todos: [], keep_open: false, revision: 0 })
-        return
-      }
+      if (!sessionId) return
       try {
-        const next = await rpc('todo.get', { session_id: sessionId })
+        const next = await host.request('todo.get', { session_id: sessionId })
         if (!cancelled && next) setState(next)
       } catch {
-        // serve may not have the RPC yet
+        // RPC not on this serve yet
       }
     }
     void refresh()
@@ -91,11 +210,24 @@ function TaskPanel() {
             if (!eventSid || eventSid === currentSessionId()) void refresh()
           })
         : () => {}
-    const onAdd = () => {
-      setAdding(true)
-      setDraft('')
+    const onOpen = () => {
+      setExpanded(true)
+      window.setTimeout(() => inputRef.current?.focus?.(), 0)
     }
-    window.addEventListener(ADD_EVENT, onAdd)
+    window.addEventListener(OPEN_EVENT, onOpen)
+    const onDocKey = event => {
+      if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.isComposing) return
+      if (!isTaskListKeyEvent(event)) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation()
+      if (event.metaKey || event.ctrlKey) {
+        queueDraftRef.current()
+        return
+      }
+      void submitRef.current()
+    }
+    document.addEventListener('keydown', onDocKey, true)
     return () => {
       cancelled = true
       window.clearInterval(timer)
@@ -107,56 +239,96 @@ function TaskPanel() {
         }
       })
       offUpdated()
-      window.removeEventListener(ADD_EVENT, onAdd)
+      window.removeEventListener(OPEN_EVENT, onOpen)
+      document.removeEventListener('keydown', onDocKey, true)
     }
   }, [])
 
   const todos = Array.isArray(state.todos) ? state.todos : []
-  const keepOpen = state.keep_open === true || todos.some(item => item.status === 'pending' || item.status === 'in_progress')
-  const done = todos.filter(item => item.status === 'completed').length
+  const outstanding = todos.filter(isOutstanding)
 
-  useEffect(() => {
-    const stack = document.querySelector('[data-slot="composer-status-stack"]')
-    if (!stack) return
-    const buttons = stack.querySelectorAll('button[aria-expanded]')
-    for (const button of buttons) {
-      const label = button.textContent || ''
-      if (!/tasks?\s+\d+\/\d+/i.test(label)) continue
-      const section = button.parentElement?.parentElement
-      if (!section) continue
-      if (keepOpen && todos.length) {
-        section.setAttribute('data-hermes-native-todos', 'hidden')
-      } else {
-        section.removeAttribute('data-hermes-native-todos')
-        if (keepOpen && button.getAttribute('aria-expanded') === 'false') {
-          button.click()
-        }
-      }
-    }
-  }, [keepOpen, todos.length, state.revision])
+  const stopKeys = event => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation()
+  }
 
-  const sessionId = sid
-  if (!sessionId || (!todos.length && !adding && !keepOpen)) return null
+  const liveSessionId = () => currentSessionId() || sid
 
-  const saveAdd = async () => {
-    const content = draft.trim()
-    setAdding(false)
-    setDraft('')
-    if (!content || !sessionId) return
+  const collectTexts = () => {
+    const liveDraft = String(inputRef.current?.value ?? draftRef.current ?? '').trim()
+    return [...queueRef.current, liveDraft].map(text => String(text || '').trim()).filter(Boolean)
+  }
+
+  const addAll = async (texts, sessionId) => {
+    const contents = texts.map(text => String(text || '').trim()).filter(Boolean)
+    if (!contents.length || !sessionId) return null
     try {
-      const next = await rpc('todo.add', { session_id: sessionId, content })
-      if (next) setState(next)
+      return await host.request('todo.add_batch', { session_id: sessionId, contents })
     } catch {
-      // ignore
+      let next = null
+      for (let i = 0; i < contents.length; i += 1) {
+        next = await host.request('todo.add', {
+          session_id: sessionId,
+          content: contents[i],
+          new_group: i === 0
+        })
+      }
+      return next
     }
   }
+
+  const submitToHermes = async () => {
+    const contents = collectTexts()
+    if (!contents.length) return
+    setQueue([])
+    setDraft('')
+    setExpanded(false)
+    const stamp = Date.now()
+    setState(prev => ({
+      ...prev,
+      keep_open: true,
+      todos: [
+        ...(Array.isArray(prev.todos) ? prev.todos : []),
+        ...contents.map((content, index) => ({
+          id: `local-${stamp}-${index}`,
+          content,
+          status: 'pending',
+          work_status: 'planned',
+          outstanding: true,
+          local: true,
+          label: content
+        }))
+      ]
+    }))
+    const sessionId = liveSessionId()
+    if (sessionId) {
+      try {
+        const next = await addAll(contents, sessionId)
+        if (next?.todos) setState(next)
+      } catch {
+        // keep local rows
+      }
+    }
+    await startHermesOnTasks(sessionId, contents)
+  }
+  submitRef.current = submitToHermes
+
+  const queueDraft = () => {
+    const content = String(inputRef.current?.value ?? draftRef.current ?? '').trim()
+    if (!content) return
+    setQueue(current => [...current, content])
+    setDraft('')
+    window.setTimeout(() => inputRef.current?.focus?.(), 0)
+  }
+  queueDraftRef.current = queueDraft
 
   const saveEdit = async id => {
     const content = editText.trim()
     setEditing('')
-    if (!content || !sessionId) return
+    if (!content || !sid) return
     try {
-      const next = await rpc('todo.update', { session_id: sessionId, id, content })
+      const next = await host.request('todo.update', { session_id: sid, id, content })
       if (next) setState(next)
     } catch {
       // ignore
@@ -164,184 +336,225 @@ function TaskPanel() {
   }
 
   const remove = async id => {
+    const sessionId = liveSessionId()
     if (!sessionId) return
+    const item = todos.find(row => todoId(row) === id)
+    const label = item ? taskLabel(item) : id
     try {
-      const next = await rpc('todo.delete', { session_id: sessionId, id })
+      const next = await host.request('todo.delete', { session_id: sessionId, id })
       if (next) setState(next)
     } catch {
       // ignore
     }
+    try {
+      await hiddenTaskTurn(
+        sessionId,
+        `Cam cancelled this task with the x button. Stop work on it. Remove it from todo_list:\n${label}`
+      )
+    } catch {
+      // already removed from the list
+    }
+  }
+
+  const barLabel = outstanding.length
+    ? `Tasks · ${outstanding.length} · ${outstanding.map(item => item.code || todoId(item)).join(' ')}`
+    : queue.length
+      ? `Tasks · ${queue.length} queued`
+      : 'Tasks'
+
+  const toggle = () => {
+    setExpanded(open => {
+      const next = !open
+      if (next) window.setTimeout(() => inputRef.current?.focus?.(), 0)
+      return next
+    })
+  }
+
+  const head = jsxs('div', {
+    className: 'hermes-tasks-head',
+    children: [
+      jsx('button', {
+        type: 'button',
+        className: 'hermes-tasks-toggle',
+        title: expanded ? 'Collapse' : 'Expand',
+        'aria-expanded': expanded,
+        'aria-label': expanded ? 'Collapse tasks' : 'Expand tasks',
+        onClick: toggle,
+        children: expanded ? '▾' : '▴'
+      }),
+      jsx('button', {
+        type: 'button',
+        className: 'hermes-tasks-title',
+        title: expanded ? 'Collapse' : 'Expand',
+        onClick: toggle,
+        children: barLabel
+      })
+    ]
+  })
+
+  if (!expanded) {
+    return jsxs('div', {
+      className: 'hermes-tasks',
+      'data-slot': 'hermes-task-list',
+      'data-min': '1',
+      children: [head]
+    })
   }
 
   return jsxs('div', {
     className: 'hermes-tasks',
     'data-slot': 'hermes-task-list',
     children: [
+      head,
       jsxs('div', {
-        className: 'hermes-tasks-head',
+        className: 'hermes-tasks-body',
         children: [
-          jsx('p', {
-            className: 'hermes-tasks-title',
-            children: todos.length ? `Tasks ${done}/${todos.length}` : 'Tasks'
-          }),
-          jsx('button', {
-            type: 'button',
-            className: 'hermes-tasks-btn',
-            title: 'Add task',
-            'aria-label': 'Add task',
-            onClick: () => {
-              setAdding(true)
-              setDraft('')
-            },
-            children: '+'
-          })
-        ]
-      }),
-      todos.length === 0 && !adding
-        ? jsx('p', { className: 'hermes-tasks-empty', children: 'No tasks yet.' })
-        : null,
-      ...todos.map(item => {
-        const id = todoId(item)
-        if (editing === id) {
-          return jsxs(
-            'div',
-            {
-              className: 'hermes-tasks-row',
-              children: [
-                jsx('input', {
-                  className: 'hermes-tasks-input',
-                  value: editText,
-                  autoFocus: true,
-                  onChange: event => setEditText(event.target.value),
-                  onKeyDown: event => {
-                    if (event.key === 'Enter') void saveEdit(id)
-                    if (event.key === 'Escape') setEditing('')
-                  }
-                }),
-                jsx('button', {
-                  type: 'button',
-                  className: 'hermes-tasks-btn',
-                  title: 'Save',
-                  onClick: () => void saveEdit(id),
-                  children: '✓'
-                })
-              ]
-            },
-            id
-          )
-        }
-        return jsxs(
-          'div',
-          {
-            className: 'hermes-tasks-row',
-            children: [
-              jsx('span', {
-                className: 'hermes-tasks-text',
-                'data-status': item.status,
-                title: item.content,
-                children: item.content
-              }),
-              jsx('button', {
-                type: 'button',
-                className: 'hermes-tasks-btn',
-                title: 'Edit task',
-                'aria-label': `Edit ${item.content}`,
-                onClick: () => {
-                  setEditing(id)
-                  setEditText(item.content || '')
+          ...outstanding.map(item => {
+            const id = todoId(item)
+            const ws = workStatus(item)
+            if (editing === id) {
+              return jsxs(
+                'div',
+                {
+                  className: 'hermes-tasks-row',
+                  children: [
+                    jsx('input', {
+                      className: 'hermes-tasks-input',
+                      value: editText,
+                      autoFocus: true,
+                      onChange: event => setEditText(event.target.value),
+                      onKeyDown: event => {
+                        if (event.key === 'Enter' && !event.metaKey && !event.ctrlKey) {
+                          stopKeys(event)
+                          void saveEdit(id)
+                        }
+                        if (event.key === 'Escape') setEditing('')
+                      }
+                    }),
+                    jsx('button', {
+                      type: 'button',
+                      className: 'hermes-tasks-btn',
+                      'data-kind': 'danger',
+                      title: 'Remove',
+                      onClick: () => void remove(id),
+                      children: '×'
+                    })
+                  ]
                 },
-                children: '✎'
-              }),
-              jsx('button', {
-                type: 'button',
-                className: 'hermes-tasks-btn',
-                'data-kind': 'danger',
-                title: 'Remove task',
-                'aria-label': `Remove ${item.content}`,
-                onClick: () => void remove(id),
-                children: '×'
-              })
-            ]
-          },
-          id
-        )
-      }),
-      adding
-        ? jsxs('div', {
+                id
+              )
+            }
+            return jsxs(
+              'div',
+              {
+                className: 'hermes-tasks-row',
+                children: [
+                  jsx('button', {
+                    type: 'button',
+                    className: 'hermes-tasks-text',
+                    'data-status': ws,
+                    title: taskLabel(item),
+                    onClick: () => {
+                      setEditing(id)
+                      setEditText(item.content || '')
+                    },
+                    children: taskLabel(item)
+                  }),
+                  jsx('button', {
+                    type: 'button',
+                    className: 'hermes-tasks-btn',
+                    'data-kind': 'danger',
+                    title: 'Remove',
+                    'aria-label': `Remove ${item.content}`,
+                    onClick: () => void remove(id),
+                    children: '×'
+                  })
+                ]
+              },
+              id
+            )
+          }),
+          ...queue.map((text, index) =>
+            jsxs(
+              'div',
+              {
+                className: 'hermes-tasks-row',
+                children: [
+                  jsx('span', {
+                    className: 'hermes-tasks-text',
+                    'data-status': 'queued',
+                    children: text
+                  }),
+                  jsx('button', {
+                    type: 'button',
+                    className: 'hermes-tasks-btn',
+                    'data-kind': 'danger',
+                    title: 'Remove',
+                    onClick: () => setQueue(current => current.filter((_, i) => i !== index)),
+                    children: '×'
+                  })
+                ]
+              },
+              `queued-${index}-${text}`
+            )
+          ),
+          jsxs('div', {
             className: 'hermes-tasks-row',
             children: [
-              jsx('input', {
+              jsx('textarea', {
+                ref: inputRef,
                 className: 'hermes-tasks-input',
+                'data-hermes-task-input': '1',
+                rows: 1,
                 value: draft,
-                autoFocus: true,
-                placeholder: 'New task',
+                placeholder: queue.length ? 'Another, then Enter' : 'New task',
                 onChange: event => setDraft(event.target.value),
                 onKeyDown: event => {
-                  if (event.key === 'Enter') void saveAdd()
-                  if (event.key === 'Escape') {
-                    setAdding(false)
-                    setDraft('')
+                  if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.isComposing) return
+                  stopKeys(event)
+                  if (event.metaKey || event.ctrlKey) {
+                    queueDraft()
+                    return
                   }
+                  void submitToHermes()
                 }
-              }),
-              jsx('button', {
-                type: 'button',
-                className: 'hermes-tasks-btn',
-                title: 'Add',
-                onClick: () => void saveAdd(),
-                children: '+'
               })
             ]
-          })
-        : null,
-      keepOpen
-        ? jsx('p', {
+          }),
+          jsx('p', {
             className: 'hermes-tasks-hint',
-            children: 'Stays open until you say a task is done or complete.'
+            children: 'Enter send · ⌘↵ queue · × remove'
           })
-        : null
+        ]
+      })
     ]
   })
 }
 
 export function registerTaskList(ctx) {
   if (typeof window !== 'undefined' && window[FLAG]) return
-  if (typeof window !== 'undefined') window[FLAG] = true
 
   const style = document.createElement('style')
   style.textContent = CSS
   document.head.append(style)
+  // Horizontal bar above the chat input. Not in the plus menu.
+  ctx.register({
+    id: 'task-panel',
+    area: 'composer.top',
+    order: 20,
+    render: () => jsx(TaskPanel, {})
+  })
+  if (typeof window !== 'undefined') window[FLAG] = true
   ctx.onDispose(() => {
     style.remove()
     if (typeof window !== 'undefined') delete window[FLAG]
-  })
-
-  const attachments = 'composer.attachments'
-  const top = 'composer.top'
-
-  ctx.register({
-    id: 'add-task',
-    area: attachments,
-    data: {
-      label: 'Add Task',
-      icon: 'checklist',
-      run: () => {
-        window.dispatchEvent(new CustomEvent(ADD_EVENT))
-      }
-    }
-  })
-  ctx.register({
-    id: 'task-panel',
-    area: top,
-    order: 15,
-    render: () => jsx(TaskPanel, {})
   })
 }
 
 export default {
   id: ID,
   name: 'Task list',
-  description: 'Plus, edit, and remove on the chat task list. Stays open until you confirm each task.',
+  description: 'Tasks in the composer plus menu. Persistent add field, queue with Cmd+Enter, send with Enter.',
   defaultEnabled: true,
   register(ctx) {
     registerTaskList(ctx)

@@ -23,6 +23,28 @@ _DEFAULT_TIMEOUT = 120
 _ORCHESTRATE_MAX_WORKERS = 6  # max parallel peers for fan-out
 
 
+def _originating_session_id(runtime: dict[str, Any]) -> str:
+    """Return the durable Hermes session receiving an asynchronous peer result.
+
+    The normal registry path passes ``session_id`` directly.  Desktop/TUI tool
+    calls can traverse the deferred-tool bridge without that keyword, while
+    their per-turn ContextVar remains correctly bound and is propagated to the
+    worker.  Read that scoped value only as a fallback; never read the ambient
+    process environment, which could belong to another concurrent session.
+    """
+    direct = str(runtime.get("session_id") or "").strip()
+    if direct:
+        return direct
+    try:
+        from gateway.session_context import get_session_env, session_context_engaged
+
+        if session_context_engaged():
+            return str(get_session_env("HERMES_SESSION_ID", "") or "").strip()
+    except Exception:
+        logger.debug("A2A could not resolve the scoped origin session", exc_info=True)
+    return ""
+
+
 def _load_config() -> dict:
     """Read-only view of config.yaml; peers are only read, never mutated (cache-safe)."""
     from hermes_cli.config import load_config_readonly
@@ -187,7 +209,7 @@ def a2a_call(args: dict, **runtime: Any) -> str:
     agent = str(args.get("agent") or args.get("agent_name") or args.get("name") or "").strip()
     message = str(args.get("message") or args.get("text") or args.get("task") or "").strip()
     context_id = str(args.get("context_id") or args.get("contextId") or "").strip()
-    reply_session_id = str(runtime.get("session_id") or "").strip()
+    reply_session_id = _originating_session_id(runtime)
     if not agent or not message:
         return "Error: both 'agent' and 'message' are required."
     peer = _resolve_peer(agent)
@@ -281,7 +303,7 @@ def a2a_orchestrate(args: dict, **runtime: Any) -> str:
     mode = str(args.get("mode") or "all").strip().lower()
     mode = mode if mode in ("all", "first", "best") else "all"
     context_id = str(args.get("context_id") or "").strip()
-    reply_session_id = str(runtime.get("session_id") or "").strip()
+    reply_session_id = _originating_session_id(runtime)
     if not message:
         return "Error: 'message' is required."
     if not capability:

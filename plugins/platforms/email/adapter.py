@@ -532,7 +532,11 @@ class EmailAdapter(BasePlatformAdapter):
                 for uid in (data[0].split() if status == "OK" and data and data[0] else []):
                     if uid in self._seen_uids:
                         continue
-                    status, msg_data = imap.uid("fetch", uid, "(RFC822)")
+                    # BODY.PEEK[] returns the same full RFC822 payload as RFC822/BODY[] but does not
+                    # implicitly set \Seen on the server, which Gmail syncs straight to its own read
+                    # status: an unpeeked fetch here silently marked every new inbox message read
+                    # before the user ever opened it.
+                    status, msg_data = imap.uid("fetch", uid, "(BODY.PEEK[])")
                     if status != "OK":
                         continue  # transient per-UID refusal: leave unseen so the next poll retries
                     # Mark seen once a response arrived (even malformed) so garbage is skipped once, not retried forever —
